@@ -1,12 +1,18 @@
 .venv/
 venv/
 __pycache__/
+**/__pycache__/
 *.pyc
+.pytest_cache/
 
 .idea/
 
 .env
 *.env
+
+*.db
+*.sqlite
+*.sqlite3
 
 *.zip
 *.rar
@@ -17,6 +23,16 @@ __pycache__/
 ~$*
 
 data/memory/*.db
+data/semantic_raw/*
+!data/semantic_raw/.gitkeep
+data/semantic_index/*
+!data/semantic_index/.gitkeep
+data/onec_mock/*
+!data/onec_mock/.gitkeep
+
+docs/_local/
+docs/_drafts/
+docs/generated/
 
 .understand-anything/
 
