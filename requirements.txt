@@ -2,3 +2,4 @@ pymupdf
 pypdf
 python-docx
 pytest
+streamlit

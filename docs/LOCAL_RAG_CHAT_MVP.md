@@ -1,0 +1,130 @@
+# Local RAG Chat MVP
+
+Этот MVP добавляет простой read-only чат поверх semantic memory.
+
+Цепочка работы:
+
+1. Пользователь задает вопрос.
+2. `SemanticRetriever` ищет релевантные chunks в SQLite/FTS базе.
+3. `build_rag_prompt()` собирает prompt с вопросом и источниками.
+4. `OllamaClient` отправляет prompt в локальную Ollama через `/api/chat`.
+5. Ответ и источники показываются в CLI или Streamlit UI.
+
+## Что реализовано
+
+- Локальный клиент Ollama: `linehelper/llm/ollama_client.py`.
+- RAG answer layer: `linehelper/llm/answer_generator.py`.
+- Streamlit chat UI: `linehelper/ui/streamlit_app.py`.
+- CLI smoke-test полного контура: `scripts/smoke_test_local_agent.py`.
+- Unit-тесты без реального вызова Ollama.
+
+## Что пока не реализовано
+
+- Нет полноценного агента с инструментами.
+- Нет интеграции с 1С.
+- Нет генерации КП.
+- Нет episodic memory.
+- Нет записи в память.
+- Нет embeddings/vector search.
+
+Контур только читает локальную semantic memory.
+
+## Ollama
+
+Ожидаемые настройки:
+
+```powershell
+$env:OLLAMA_BASE_URL="http://localhost:11434"
+$env:OLLAMA_MODEL="qwen2.5:14b"
+```
+
+Проверка Ollama вручную:
+
+```powershell
+$body = @{
+  model = "qwen2.5:14b"
+  stream = $false
+  messages = @(
+    @{ role = "user"; content = "Ответь по-русски: что такое тест?" }
+  )
+  options = @{
+    temperature = 0
+    num_predict = 100
+  }
+} | ConvertTo-Json -Depth 10
+
+Invoke-RestMethod `
+  -Uri "http://localhost:11434/api/chat" `
+  -Method Post `
+  -ContentType "application/json; charset=utf-8" `
+  -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
+```
+
+Используется `/api/chat`, а не `/api/generate`, потому что MVP сразу работает в chat-формате: system message + user prompt. Это ближе к будущему интерфейсу чата и проще расширяется.
+
+UTF-8 важен, потому что русские вопросы и корпоративные источники должны уходить в Ollama без повреждения кодировки. Python-клиент отправляет JSON body как UTF-8 и выставляет `Content-Type: application/json; charset=utf-8`.
+
+## Env-переменные
+
+```text
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=qwen2.5:14b
+OLLAMA_TIMEOUT_SECONDS=180
+OLLAMA_TEMPERATURE=0
+OLLAMA_NUM_PREDICT=700
+```
+
+`.env` можно использовать локально, но файл `.env` не должен попадать в Git.
+
+## CLI smoke-test
+
+```powershell
+cd "C:\Users\Nikolai Paliy\work\projects\linehelper"
+
+.\.venv\Scripts\python.exe scripts\smoke_test_local_agent.py
+```
+
+Если Codex-процесс не запускает `.venv`, можно использовать bundled Python:
+
+```powershell
+$PY="C:\Users\Nikolai Paliy\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
+& $PY scripts\smoke_test_local_agent.py
+```
+
+## Streamlit UI
+
+```powershell
+cd "C:\Users\Nikolai Paliy\work\projects\linehelper"
+
+.\.venv\Scripts\streamlit.exe run linehelper\ui\streamlit_app.py
+```
+
+Альтернатива:
+
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run linehelper\ui\streamlit_app.py
+```
+
+## Проверки
+
+```powershell
+.\.venv\Scripts\python.exe scripts\smoke_test_semantic_retrieval.py
+.\.venv\Scripts\python.exe scripts\smoke_test_rag_prompt.py
+.\.venv\Scripts\python.exe scripts\smoke_test_semantic_memory.py
+.\.venv\Scripts\python.exe scripts\smoke_test_semantic_ingest.py
+.\.venv\Scripts\python.exe -m pytest -q tests scripts\tests --basetemp .venv\pytest-tmp -p no:cacheprovider
+```
+
+`scripts/smoke_test_local_agent.py` и Streamlit UI требуют запущенную Ollama и локальную модель `qwen2.5:14b`.
+
+## Git safety
+
+В Git не должны попадать:
+
+- `.env`;
+- `.venv`;
+- `data/raw_docs/*`;
+- `data/memory/*.db`;
+- `data/semantic_index/curated_chunks.jsonl`;
+- backups;
+- временные файлы и pytest tmp.
