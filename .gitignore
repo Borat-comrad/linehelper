@@ -25,6 +25,8 @@ __pycache__/
 data/memory/*.db
 data/semantic_raw/*
 !data/semantic_raw/.gitkeep
+data/raw_docs/*
+!data/raw_docs/.gitkeep
 data/semantic_index/*
 !data/semantic_index/.gitkeep
 data/onec_mock/*
