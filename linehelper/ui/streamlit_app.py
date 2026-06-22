@@ -91,6 +91,8 @@ def _render_result_details(result) -> None:
         st.write(f"Chunks used: {result.chunks_used}")
         st.write(f"Retrieval limit: {result.retrieval_limit}")
         st.write(f"Candidate limit: {result.candidate_limit}")
+        st.write(f"Context limit: {result.context_limit}")
+        st.write(f"Context score ratio: {result.context_score_ratio}")
         if result.sources:
             st.write("Chunks:")
             for source in result.sources:

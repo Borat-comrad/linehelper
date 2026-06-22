@@ -13,6 +13,7 @@ from linehelper.llm.answer_generator import RagAnswerError, RagAnswerGenerator  
 
 
 QUESTIONS = [
+    "Хочу взять отпуск, что делать?",
     "Что говорится про планирование на неделю?",
     "Зачем нужны планы на неделю?",
     "Какие обязанности у сотрудника при планировании на неделю?",

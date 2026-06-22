@@ -50,6 +50,61 @@ def test_empty_retrieval_does_not_call_llm() -> None:
     assert client.messages == []
 
 
+def test_vacation_question_filters_noisy_context_chunks() -> None:
+    vacation_1 = _chunk_with(
+        title="Инструкция Отпуск в Документообороте",
+        section="Порядок работы: часть 1",
+        text="Чтобы оформить отпуск, сотрудник создает задачу на отпуск в Документообороте.",
+        final_score=180.0,
+    )
+    vacation_2 = _chunk_with(
+        title="Инструкция Отпуск в Документообороте",
+        section="Порядок работы: часть 2",
+        text="После создания задачи отпуск согласуется по маршруту в Документообороте.",
+        final_score=174.0,
+    )
+    noise = [
+        _chunk_with(
+            title="Работа с задачами",
+            section="Статусы задач",
+            text="Если нужно взять задачу в работу, измените статус задачи.",
+            final_score=123.0,
+        ),
+        _chunk_with(
+            title="Регламент по статистикам",
+            section="Падающая статистика",
+            text="Руководитель может взять статистику для анализа.",
+            final_score=93.0,
+        ),
+        _chunk_with(
+            title="Инструкция - Как начать работу в новой должности",
+            section="Когда вас игнорируют",
+            text="При начале работы в новой должности нужно изучить должностную папку.",
+            final_score=92.0,
+        ),
+    ]
+    client = FakeClient("Нужно оформить отпуск по инструкции.")
+    generator = RagAnswerGenerator(
+        retriever=FakeRetriever([vacation_1, vacation_2, *noise]),
+        llm_client=client,
+        context_limit=3,
+        context_score_ratio=0.65,
+    )
+
+    result = generator.answer("Хочу взять отпуск, что делать?")
+    prompt = client.messages[-1]["content"]
+
+    assert result.chunks_used == 2
+    assert [source.title for source in result.sources] == [
+        "Инструкция Отпуск в Документообороте",
+        "Инструкция Отпуск в Документообороте",
+    ]
+    assert "Инструкция Отпуск в Документообороте" in prompt
+    assert "Работа с задачами" not in prompt
+    assert "Регламент по статистикам" not in prompt
+    assert "Инструкция - Как начать работу в новой должности" not in prompt
+
+
 def test_llm_error_is_wrapped() -> None:
     generator = RagAnswerGenerator(
         retriever=FakeRetriever([_chunk()]),
@@ -100,13 +155,28 @@ class ErrorClient:
 
 
 def _chunk() -> RetrievedChunk:
+    return _chunk_with(
+        title="Тестовый документ",
+        section="Тестовый раздел",
+        text="Тестовый текст для prompt builder.",
+        final_score=3.0,
+    )
+
+
+def _chunk_with(
+    *,
+    title: str,
+    section: str,
+    text: str,
+    final_score: float,
+) -> RetrievedChunk:
     return RetrievedChunk(
         chunk_id=1,
-        title="Тестовый документ",
+        title=title,
         source="data/raw_docs/test.pdf",
-        section="Тестовый раздел",
+        section=section,
         page=3,
-        text="Тестовый текст для prompt builder.",
+        text=text,
         score=1.0,
         metadata={
             "logical_unit_title": "Тестовый смысловой блок",
@@ -116,7 +186,7 @@ def _chunk() -> RetrievedChunk:
         doc_type="test_doc",
         base_score=1.0,
         rerank_score=2.0,
-        final_score=3.0,
+        final_score=final_score,
         matched_terms=["тест"],
         matched_excerpt="релевантный фрагмент",
         selection_reasons=["test"],
