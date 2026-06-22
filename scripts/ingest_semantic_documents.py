@@ -1,40 +1,48 @@
-"""Semantic ingest for local LineHelper knowledge documents."""
+"""Validate and import curated semantic chunks into LineHelper memory."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
-import re
+import shutil
 import sqlite3
 import sys
-from dataclasses import asdict, dataclass, field
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_RAW_DIR = PROJECT_ROOT / "data" / "raw_docs"
+DEFAULT_CURATED_PATH = PROJECT_ROOT / "data" / "semantic_index" / "curated_chunks.jsonl"
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "memory" / "linehelper_memory.db"
-DEFAULT_PREVIEW_PATH = PROJECT_ROOT / "data" / "semantic_index" / "chunk_preview.jsonl"
-SUPPORTED_SUFFIXES = frozenset({".txt", ".md", ".pdf"})
-LOADER_VERSION = "semantic_ingest_v2"
+SEMANTIC_INDEX_DIR = PROJECT_ROOT / "data" / "semantic_index"
+RAW_DOCS_DIR = PROJECT_ROOT / "data" / "raw_docs"
 NAMESPACE = "semantic"
-HARD_MAX_CHARS = 2400
-MIN_MERGE_CHARS = 300
+CHUNKING_STRATEGY = "llm_curated"
+LOADER_VERSION = "curated_semantic_v1"
 
-sys.path.insert(0, str(PROJECT_ROOT))
+REQUIRED_FIELDS = {
+    "namespace",
+    "doc_type",
+    "title",
+    "source_file",
+    "relative_path",
+    "section",
+    "section_path",
+    "logical_unit_type",
+    "logical_unit_title",
+    "text",
+    "page_start",
+    "page_end",
+    "part_index",
+    "part_count",
+    "tags",
+    "notes",
+}
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
-except AttributeError:  # pragma: no cover - for very old Python versions
-    pass
-
-from linehelper.memory.memory_store import MemoryStore  # noqa: E402
-
-
-DOC_TYPES = {
+ALLOWED_DOC_TYPES = {
     "company_goals",
     "company_ckp",
     "zrs_policy",
@@ -42,10 +50,18 @@ DOC_TYPES = {
     "document_flow_policy",
     "onboarding_instruction",
     "org_structure",
+    "one_c_instruction",
+    "contract_instruction",
+    "hr_instruction",
+    "planning_policy",
+    "coordination_policy",
+    "communication_policy",
+    "sales_process",
+    "reference",
     "unknown",
 }
 
-LOGICAL_UNIT_TYPES = {
+ALLOWED_LOGICAL_UNIT_TYPES = {
     "definition",
     "policy_rule",
     "procedure",
@@ -60,911 +76,284 @@ LOGICAL_UNIT_TYPES = {
     "mixed",
 }
 
+RESET_FILES = (
+    DEFAULT_DB_PATH,
+    SEMANTIC_INDEX_DIR / "chunk_preview.jsonl",
+    SEMANTIC_INDEX_DIR / "curated_chunks.jsonl",
+    SEMANTIC_INDEX_DIR / "curated_chunks_preview.jsonl",
+    SEMANTIC_INDEX_DIR / "curation_manifest.json",
+    SEMANTIC_INDEX_DIR / "import_report.json",
+)
+RESET_PATTERNS = (
+    PROJECT_ROOT / "data" / "memory" / "*.sqlite",
+    PROJECT_ROOT / "data" / "memory" / "*.sqlite3",
+)
+RESET_DIRS = (SEMANTIC_INDEX_DIR / "pytest-tmp",)
 
-@dataclass(frozen=True)
-class DocumentPage:
-    number: int
-    text: str
+sys.path.insert(0, str(PROJECT_ROOT))
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except AttributeError:  # pragma: no cover - older Python
+    pass
+
+from linehelper.memory.memory_store import MemoryStore  # noqa: E402
 
 
-@dataclass(frozen=True)
-class SemanticDocument:
-    path: Path
-    relative_path: str
-    title: str
-    suffix: str
-    pages: list[DocumentPage]
+@dataclass
+class ValidationResult:
+    chunks: list[dict[str, Any]] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     @property
-    def text(self) -> str:
-        return "\n\n".join(page.text for page in self.pages if page.text.strip())
-
-    @property
-    def page_count(self) -> int:
-        return len(self.pages)
+    def ok(self) -> bool:
+        return not self.errors
 
 
-@dataclass
-class SectionBlock:
-    title: str
-    section_path: list[str]
-    text: str
-    page_start: int | None
-    page_end: int | None
-
-
-@dataclass
-class LogicalUnit:
-    logical_unit_id: str
-    logical_unit_type: str
-    title: str
-    text: str
-    section: str
-    section_path: str
-    parent_section: str
-    page_start: int | None
-    page_end: int | None
-    warnings: list[str] = field(default_factory=list)
-
-
-@dataclass
-class DocumentProfile:
-    source_file: str
-    relative_path: str
-    doc_type: str
-    title: str
-    page_count: int
-    detected_headings: list[str]
-    detected_sections: list[str]
-    logical_units: list[dict[str, Any]]
-    structure_quality: str
-    warnings: list[str]
-
-
-@dataclass
-class PreparedChunk:
-    text: str
-    metadata: dict[str, Any]
-
-
-def read_text_file(path: Path) -> str:
-    """Read local text with encodings common for Windows-authored files."""
-    for encoding in ("utf-8-sig", "utf-8", "cp1251"):
-        try:
-            return path.read_text(encoding=encoding)
-        except UnicodeDecodeError:
-            continue
-
-    return path.read_text(encoding="utf-8", errors="replace")
-
-
-def read_pdf_pages(path: Path) -> tuple[list[DocumentPage], list[str]]:
-    """Extract PDF text page by page without OCR."""
-    warnings: list[str] = []
-
+def display_path(path: Path) -> str:
     try:
-        from pypdf import PdfReader
-    except ImportError:
-        return [], [
-            "pypdf is not installed; PDF text extraction is unavailable. "
-            "Install dependencies from requirements.txt."
-        ]
-
-    pages: list[DocumentPage] = []
-
-    try:
-        reader = PdfReader(str(path))
-    except Exception as exc:  # pragma: no cover - depends on broken PDFs
-        return [], [f"Failed to open PDF: {exc}"]
-
-    for index, page in enumerate(reader.pages, start=1):
-        try:
-            text = page.extract_text() or ""
-        except Exception as exc:  # pragma: no cover - depends on broken PDFs
-            text = ""
-            warnings.append(f"Page {index}: failed to extract text: {exc}")
-
-        if not text.strip():
-            warnings.append(f"Page {index}: no extractable text")
-
-        pages.append(DocumentPage(number=index, text=normalize_newlines(text)))
-
-    return pages, warnings
-
-
-def normalize_newlines(text: str) -> str:
-    return text.replace("\r\n", "\n").replace("\r", "\n")
-
-
-def make_relative_path(path: Path) -> str:
-    try:
-        return path.relative_to(PROJECT_ROOT).as_posix()
+        return str(path.relative_to(PROJECT_ROOT))
     except ValueError:
-        return path.as_posix()
-
-
-def iter_semantic_documents(raw_dir: Path, verbose: bool = False) -> list[SemanticDocument]:
-    """Return supported semantic documents from raw_dir."""
-    if not raw_dir.exists():
-        return []
-
-    documents: list[SemanticDocument] = []
-
-    for path in sorted(raw_dir.rglob("*")):
-        if not path.is_file() or path.name == ".gitkeep":
-            continue
-
-        suffix = path.suffix.lower()
-        if suffix not in SUPPORTED_SUFFIXES:
-            if verbose:
-                print(f"Skip unsupported file type: {path.name}")
-            continue
-
-        warnings: list[str] = []
-        if suffix == ".pdf":
-            pages, warnings = read_pdf_pages(path)
-        else:
-            text = read_text_file(path)
-            pages = [DocumentPage(number=1, text=normalize_newlines(text))]
-
-        if not any(page.text.strip() for page in pages):
-            if verbose:
-                print(f"Skip empty document: {path.name}")
-            continue
-
-        documents.append(
-            SemanticDocument(
-                path=path,
-                relative_path=make_relative_path(path),
-                title=path.stem,
-                suffix=suffix,
-                pages=pages,
-                warnings=warnings,
-            )
-        )
-
-    return documents
-
-
-def compact_spaces(text: str) -> str:
-    return re.sub(r"[ \t]+", " ", text).strip()
+        return str(path)
 
 
 def normalize_for_hash(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip().lower()
+    return " ".join(text.split()).strip().lower()
 
 
-def content_hash(text: str) -> str:
-    return hashlib.sha256(normalize_for_hash(text).encode("utf-8")).hexdigest()
-
-
-def first_nonempty_line(text: str) -> str | None:
-    for line in text.splitlines():
-        clean = line.strip(" #\t")
-        if clean:
-            return clean[:180]
-    return None
-
-
-def first_meaningful_line(text: str) -> str | None:
-    for line in text.splitlines():
-        clean = line.strip(" #\t")
-        if clean and not is_noise_content_line(clean):
-            return clean[:180]
-    return first_nonempty_line(text)
-
-
-def detect_doc_type(document: SemanticDocument) -> str:
-    name = document.path.stem.casefold()
-    haystack = f"{document.path.name}\n{document.text[:8000]}".casefold()
-
-    if "как начать работу в новой должности" in name:
-        return "onboarding_instruction"
-    if "ип-0002" in name or "цели и замыслы" in name:
-        return "company_goals"
-    if "ип-0003" in name or re.search(r"\bцкп\b", name):
-        return "company_ckp"
-    if "ип-0004" in name or re.search(r"\bструктура\s+зрс\b", name):
-        return "zrs_policy"
-    if "ип-0005" in name or "распоряжен" in name:
-        return "orders_policy"
-    if "ип-0006" in name or "документооборот" in name or "1с до" in name:
-        return "document_flow_policy"
-    if "оргсхем" in name or "орган труда" in name:
-        return "org_structure"
-    if "контраген" in name or "договор" in name or "счет" in name or "buh-bit" in name or "crm" in name:
-        return "document_flow_policy"
-    if "приказ" in name:
-        return "orders_policy"
-    if "координац" in name or "планирован" in name:
-        return "orders_policy"
-
-    checks: list[tuple[str, list[str]]] = [
-        ("org_structure", ["оргсхем", "организационн", "структурн", "отделение", "секции"]),
-        ("company_ckp", ["цкп serviceline", "цкп компании", "комплексная услуга", "ценный конечный продукт"]),
-        ("company_goals", ["цели и замыслы", "замыслы компании", "идеальная картина", "рациональност", "экологичност"]),
-        ("zrs_policy", ["структура зрс", "заявка руководителю", "зрс состоит", "ситуация данные решение"]),
-        ("orders_policy", ["распоряжен", "письменная форма распоряжения", "контроль исполнения"]),
-        ("document_flow_policy", ["документооборот", "официальная переписка", "внутренний документооборот"]),
-        ("onboarding_instruction", ["как начать работу в новой должности", "новой должности", "вас игнорируют"]),
-    ]
-
-    scores: dict[str, int] = {doc_type: 0 for doc_type in DOC_TYPES}
-    for doc_type, keywords in checks:
-        scores[doc_type] += sum(1 for keyword in keywords if keyword in haystack)
-
-    if scores["org_structure"] == 1 and "оргсхем" not in haystack:
-        scores["org_structure"] = 0
-
-    best = max(scores.items(), key=lambda item: item[1])
-    return best[0] if best[1] > 0 else "unknown"
-
-
-def markdown_heading(line: str) -> tuple[int, str] | None:
-    match = re.match(r"^(#{1,3})\s+(.+?)\s*$", line)
-    if not match:
-        return None
-    return len(match.group(1)), compact_spaces(match.group(2))
-
-
-def is_list_or_step_line(line: str) -> bool:
-    clean = line.strip()
-    return bool(
-        re.match(r"^([-*•]\s+|\d+[.)]\s+|[а-яa-z]\)\s+)", clean, re.IGNORECASE)
-        or re.match(r"^шаг\s*№?\s*\d+", clean, re.IGNORECASE)
+def compute_content_hash(*, text: str, source_file: str, namespace: str) -> str:
+    payload = "\n".join(
+        (
+            namespace.strip(),
+            source_file.strip(),
+            normalize_for_hash(text),
+        )
     )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def uppercase_ratio(text: str) -> float:
-    letters = [char for char in text if char.isalpha()]
-    if not letters:
-        return 0.0
-    return sum(1 for char in letters if char.upper() == char and char.lower() != char) / len(letters)
+def project_path(value: str | Path) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return PROJECT_ROOT / path
 
 
-def generic_heading(line: str, prev_blank: bool, next_blank: bool) -> str | None:
-    clean = compact_spaces(line.strip(" -*•\t"))
-    if not clean or len(clean) > 160:
-        return None
-    if is_noise_heading(clean):
-        return None
-    if clean[0].islower():
-        return None
-    if is_list_or_step_line(line) and not re.match(r"^шаг\s*№?\s*\d+", clean, re.IGNORECASE):
-        return None
-    if clean.endswith((".", ";", ",")) and not re.match(r"^\d+(\.\d+)*\.?\s+", clean):
-        return None
-
-    keyword_pattern = re.compile(
-        r"\b(ПРИМЕР|ОБЯЗАННОСТИ|ЦКП|ЦЕЛЬ|ЗАМЫСЕЛ|ИСТОРИЯ|РАСПОРЯЖЕНИЯ|"
-        r"ДОКУМЕНТООБОРОТ|ИНСТРУКЦИЯ|ПОРЯДОК|ПРАВИЛА|СТРУКТУРА|ОТДЕЛ|СЕКЦИЯ|ШАГ)\b",
-        re.IGNORECASE,
-    )
-
-    numbered = bool(re.match(r"^\d+(\.\d+)*\.?\s+\S+", clean) and (prev_blank or next_blank))
-    step = bool(re.match(r"^шаг\s*№?\s*\d+", clean, re.IGNORECASE))
-    upper = uppercase_ratio(clean) >= 0.65 and len(clean) <= 120
-    colon = clean.endswith(":") and len(clean) <= 120
-    keyword = bool(keyword_pattern.search(clean) and (prev_blank or next_blank or upper or colon))
-
-    if numbered or step or upper or colon or keyword:
-        return clean.rstrip(":")
-
-    return None
-
-
-def is_noise_heading(text: str) -> bool:
-    clean = compact_spaces(text)
-    lowered = clean.casefold()
-    if re.fullmatch(r"\d+", clean):
-        return True
-    if "serviceline все авторские права защищены" in lowered:
-        return True
-    if lowered.startswith("поместить в папку"):
-        return True
-    if lowered in {"утвержден", "оглавление", "регламент"}:
-        return True
-    if re.fullmatch(r"стр\.?\s*\d+", lowered):
-        return True
-    return False
-
-
-def is_noise_content_line(text: str) -> bool:
-    clean = compact_spaces(text)
-    lowered = clean.casefold()
-    if not clean:
-        return True
-    if re.fullmatch(r"\d+", clean):
-        return True
-    if re.fullmatch(r"страница\s+\d+\s+из\s+\d+", lowered):
-        return True
-    if "serviceline все авторские права защищены" in lowered:
-        return True
-    if lowered.startswith("поместить в папку"):
-        return True
-    return False
-
-
-def meaningful_text(text: str) -> str:
-    return "\n".join(line for line in text.splitlines() if not is_noise_content_line(line))
-
-
-def split_page_lines(page: DocumentPage) -> list[tuple[str, int]]:
-    return [(line.rstrip(), page.number) for line in page.text.splitlines()]
-
-
-def split_blocks(lines: list[tuple[str, int]]) -> list[tuple[str, int, int]]:
-    blocks: list[tuple[str, int, int]] = []
-    current: list[str] = []
-    page_start: int | None = None
-    page_end: int | None = None
-
-    def flush() -> None:
-        nonlocal current, page_start, page_end
-        if current and page_start is not None and page_end is not None:
-            blocks.append(("\n".join(current).strip(), page_start, page_end))
-        current = []
-        page_start = None
-        page_end = None
-
-    for line, page_number in lines:
-        if not line.strip():
-            flush()
-            continue
-        if page_start is None:
-            page_start = page_number
-        page_end = page_number
-        current.append(line)
-
-    flush()
-    return blocks
-
-
-def section_level_from_heading(title: str, default_level: int = 1) -> int:
-    match = re.match(r"^(\d+(?:\.\d+)*)\.?\s+", title)
-    if match:
-        return min(match.group(1).count(".") + 1, 3)
-    if re.match(r"^шаг\s*№?\s*\d+", title, re.IGNORECASE):
-        return 2
-    return default_level
-
-
-def parse_sections(document: SemanticDocument) -> tuple[list[SectionBlock], list[str]]:
-    if document.suffix == ".md":
-        return parse_markdown_sections(document)
-    return parse_generic_sections(document)
-
-
-def parse_markdown_sections(document: SemanticDocument) -> tuple[list[SectionBlock], list[str]]:
-    sections: list[SectionBlock] = []
-    headings: list[str] = []
-    stack: list[str] = []
-    current_lines: list[str] = []
-    current_path: list[str] = [document.title]
-    page_start: int | None = None
-    page_end: int | None = None
-
-    def flush() -> None:
-        nonlocal current_lines, page_start, page_end
-        text = "\n".join(current_lines).strip()
-        if text:
-            title = current_path[-1] if current_path else document.title
-            sections.append(
-                SectionBlock(
-                    title=title,
-                    section_path=list(current_path),
-                    text=text,
-                    page_start=page_start,
-                    page_end=page_end,
-                )
-            )
-        current_lines = []
-        page_start = None
-        page_end = None
-
-    for page in document.pages:
-        for raw_line in page.text.splitlines():
-            heading = markdown_heading(raw_line)
-            if heading:
-                flush()
-                level, title = heading
-                headings.append(title)
-                stack = stack[: level - 1]
-                stack.append(title)
-                current_path = list(stack)
-                current_lines.append(raw_line.strip())
-                page_start = page.number
-                page_end = page.number
-                continue
-
-            if raw_line.strip():
-                if page_start is None:
-                    page_start = page.number
-                page_end = page.number
-            current_lines.append(raw_line.rstrip())
-
-    flush()
-    if not sections and document.text.strip():
-        sections.append(
-            SectionBlock(
-                title=document.title,
-                section_path=[document.title],
-                text=document.text.strip(),
-                page_start=1,
-                page_end=document.page_count or 1,
-            )
-        )
-
-    return sections, headings
-
-
-def parse_generic_sections(document: SemanticDocument) -> tuple[list[SectionBlock], list[str]]:
-    sections: list[SectionBlock] = []
-    headings: list[str] = []
-    stack: list[str] = [document.title]
-    current_lines: list[str] = []
-    current_path: list[str] = [document.title]
-    page_start: int | None = None
-    page_end: int | None = None
-
-    flat_lines: list[tuple[str, int]] = []
-    for page in document.pages:
-        flat_lines.extend(split_page_lines(page))
-
-    def flush() -> None:
-        nonlocal current_lines, page_start, page_end
-        text = "\n".join(current_lines).strip()
-        if text:
-            sections.append(
-                SectionBlock(
-                    title=current_path[-1] if current_path else document.title,
-                    section_path=list(current_path),
-                    text=text,
-                    page_start=page_start,
-                    page_end=page_end,
-                )
-            )
-        current_lines = []
-        page_start = None
-        page_end = None
-
-    for index, (line, page_number) in enumerate(flat_lines):
-        prev_blank = index == 0 or not flat_lines[index - 1][0].strip()
-        next_blank = index == len(flat_lines) - 1 or not flat_lines[index + 1][0].strip()
-        heading = generic_heading(line, prev_blank=prev_blank, next_blank=next_blank)
-
-        if heading:
-            flush()
-            level = section_level_from_heading(heading)
-            stack = stack[: max(level, 1)]
-            if stack and stack[-1] == heading:
-                stack[-1] = heading
-            else:
-                stack.append(heading)
-            current_path = list(stack[1:] or [heading])
-            headings.append(heading)
-            current_lines.append(line.strip())
-            page_start = page_number
-            page_end = page_number
-            continue
-
-        if line.strip():
-            if page_start is None:
-                page_start = page_number
-            page_end = page_number
-        current_lines.append(line.rstrip())
-
-    flush()
-    if not sections and document.text.strip():
-        sections.append(
-            SectionBlock(
-                title=document.title,
-                section_path=[document.title],
-                text=document.text.strip(),
-                page_start=1,
-                page_end=document.page_count or 1,
-            )
-        )
-
-    return sections, headings
-
-
-def classify_logical_unit(doc_type: str, section_title: str, text: str) -> str:
-    haystack = f"{section_title}\n{text[:2000]}".casefold()
-
-    if doc_type == "org_structure":
-        return "org_unit"
-    if doc_type == "company_ckp" and ("цкп" in haystack or "ценный конечный продукт" in haystack):
-        return "ckp_statement"
-    if doc_type == "company_goals" and any(word in haystack for word in ("цель", "замысел", "идеальная картина")):
-        return "company_goal"
-    if doc_type == "document_flow_policy" and any(
-        word in haystack
-        for word in (
-            "инструкц",
-            "заяв",
-            "соглас",
-            "создать",
-            "заходим",
-            "нажима",
-            "выбираем",
-            "заполняем",
-            "вкладк",
-            "документ",
-            "процесс",
-            "этап",
-            "1с",
-            "crm",
-        )
-    ):
-        return "procedure"
-    if any(word in haystack for word in ("обязанност", "отвечает", "ответственн", "роль", "руководител", "подчин")):
-        return "role_responsibility"
-    if any(
-        word in haystack
-        for word in (
-            "шаг",
-            "инструкц",
-            "порядок",
-            "процедур",
-            "выполн",
-            "согласован",
-            "заявк",
-            "создать",
-            "создаем",
-            "заходим",
-            "нажимаем",
-            "выбираем",
-            "заполняем",
-            "переходим",
-            "далее",
-        )
-    ):
-        return "procedure"
-    if any(word in haystack for word in ("требован", "чек-лист", "список", "перечень")) or count_list_items(text) >= 3:
-        return "checklist"
-    if any(word in haystack for word in ("это", "является", "означает", "определение")) and len(text) < 1200:
-        return "definition"
-    if any(word in haystack for word in ("правило", "запрещ", "должен", "необходимо", "следует", "распоряжен")):
-        return "policy_rule"
-    if "пример" in haystack:
-        return "example"
-    if any(word in haystack for word in ("история", "истор")):
-        return "historical_context"
-    if any(word in haystack for word in ("справ", "ссылка", "контакт", "форма")):
-        return "reference_block"
-    return "mixed"
-
-
-def count_list_items(text: str) -> int:
-    return sum(1 for line in text.splitlines() if is_list_or_step_line(line))
-
-
-def section_text_with_heading(section: SectionBlock) -> str:
-    text = section.text.strip()
-    if not text:
-        return ""
-    first = first_nonempty_line(text)
-    if first and compact_spaces(first).casefold() == compact_spaces(section.title).casefold():
-        return text
-    return f"{section.title}\n\n{text}"
-
-
-def build_logical_units(
-    *,
-    document: SemanticDocument,
-    doc_type: str,
-    sections: list[SectionBlock],
-) -> list[LogicalUnit]:
-    units: list[LogicalUnit] = []
-
-    for index, section in enumerate(sections, start=1):
-        text = section_text_with_heading(section).strip()
-        if not text:
-            continue
-        if len(meaningful_text(text)) < 40:
-            continue
-
-        unit_type = classify_logical_unit(doc_type, section.title, text)
-        section_path = " > ".join(section.section_path)
-        units.append(
-            LogicalUnit(
-                logical_unit_id=f"{document.path.stem}-{index:04d}",
-                logical_unit_type=unit_type,
-                title=section.title,
-                text=text,
-                section=section.title,
-                section_path=section_path,
-                parent_section=section.section_path[-2] if len(section.section_path) > 1 else "",
-                page_start=section.page_start,
-                page_end=section.page_end,
-            )
-        )
-
-    return merge_small_related_units(units)
-
-
-def merge_small_related_units(units: list[LogicalUnit]) -> list[LogicalUnit]:
-    if len(units) < 2:
-        return units
-
-    protected = {"definition", "policy_rule", "example", "ckp_statement", "company_goal"}
-    merged: list[LogicalUnit] = []
-
-    for unit in units:
-        if (
-            merged
-            and len(unit.text) < MIN_MERGE_CHARS
-            and unit.logical_unit_type not in protected
-            and merged[-1].parent_section == unit.parent_section
-            and len(merged[-1].text) + len(unit.text) + 2 <= HARD_MAX_CHARS
-        ):
-            previous = merged[-1]
-            previous.text = f"{previous.text}\n\n{unit.text}"
-            previous.title = merge_titles(previous.title, unit.title)
-            previous.section = previous.title
-            if previous.logical_unit_type == "org_unit" and unit.logical_unit_type == "org_unit":
-                previous.section_path = previous.parent_section or previous.section_path
-            else:
-                previous.section_path = merge_section_paths(previous.section_path, unit.title)
-            previous.page_end = unit.page_end or previous.page_end
-            if previous.logical_unit_type != unit.logical_unit_type:
-                previous.logical_unit_type = "mixed"
-            continue
-        merged.append(unit)
-
-    return merged
-
-
-def merge_titles(first: str, second: str, max_length: int = 180) -> str:
-    merged = f"{first} / {second}"
-    if len(merged) <= max_length:
-        return merged
-    return f"{first[:80].rstrip()} / ... / {second[:80].rstrip()}"
-
-
-def merge_section_paths(section_path: str, title: str, max_length: int = 300) -> str:
-    merged = f"{section_path} > {title}"
-    if len(merged) <= max_length:
-        return merged
-    return section_path
-
-
-def detect_structure_quality(
-    sections: list[SectionBlock],
-    headings: list[str],
-    warnings: list[str],
-    *,
-    doc_type: str,
-    text_length: int,
-) -> str:
-    if not headings and doc_type != "unknown" and text_length >= 500:
-        return "medium"
-    if warnings and not headings:
-        return "poor"
-    if len(headings) >= 3 and len(sections) >= 3:
-        return "good"
-    if headings or len(sections) >= 2:
-        return "medium"
-    return "poor"
-
-
-def build_profile(document: SemanticDocument) -> tuple[DocumentProfile, list[LogicalUnit]]:
-    doc_type = detect_doc_type(document)
-    sections, headings = parse_sections(document)
-    warnings = list(document.warnings)
-
-    if not headings:
-        warnings.append(
-            "Document structure is weakly detected: no reliable headings were found; "
-            "fallback by paragraphs/pages is used."
-        )
-
-    quality = detect_structure_quality(
-        sections,
-        headings,
-        warnings,
-        doc_type=doc_type,
-        text_length=len(document.text),
-    )
-    units = build_logical_units(document=document, doc_type=doc_type, sections=sections)
-
-    if quality == "poor":
-        warnings.append(
-            "Poor structure quality: PDF text extraction produced too little reliable hierarchy; "
-            "manual review is recommended."
-        )
-        for unit in units:
-            unit.warnings.append("Poor document structure; semantic unit may be broad.")
-    if doc_type == "unknown":
-        warnings.append(
-            "Document type remains unknown: filename and extracted text did not match supported semantic doc_type rules."
-        )
-
-    profile = DocumentProfile(
-        source_file=document.path.name,
-        relative_path=document.relative_path,
-        doc_type=doc_type,
-        title=first_meaningful_line(document.text) or document.title,
-        page_count=document.page_count,
-        detected_headings=headings[:100],
-        detected_sections=[" > ".join(section.section_path) for section in sections[:100]],
-        logical_units=[
-            {
-                "logical_unit_id": unit.logical_unit_id,
-                "logical_unit_type": unit.logical_unit_type,
-                "logical_unit_title": unit.title,
-                "section_path": unit.section_path,
-                "page_start": unit.page_start,
-                "page_end": unit.page_end,
-            }
-            for unit in units
-        ],
-        structure_quality=quality,
-        warnings=warnings,
-    )
-    return profile, units
-
-
-def split_paragraphs_preserving_lists(text: str) -> list[str]:
-    raw_blocks = split_blocks([(line, 1) for line in text.splitlines()])
-    paragraphs = [block[0] for block in raw_blocks if block[0].strip()]
-    if not paragraphs:
-        return [text.strip()] if text.strip() else []
-
-    grouped: list[str] = []
-    index = 0
-    while index < len(paragraphs):
-        current = paragraphs[index]
-        current_lines = current.splitlines()
-        is_list_block = any(is_list_or_step_line(line) for line in current_lines)
-        if is_list_block and grouped and len(grouped[-1]) < 300:
-            grouped[-1] = f"{grouped[-1]}\n\n{current}"
-        else:
-            grouped.append(current)
-        index += 1
-    return grouped
-
-
-def split_oversized_paragraph(paragraph: str, hard_max: int, overlap: int) -> list[str]:
-    if len(paragraph) <= hard_max:
-        return [paragraph]
-
-    parts: list[str] = []
-    start = 0
-    safe_overlap = max(0, min(overlap, 250))
-
-    while start < len(paragraph):
-        end = min(start + hard_max, len(paragraph))
-        if end < len(paragraph):
-            boundary = max(paragraph.rfind("\n", start, end), paragraph.rfind(". ", start, end))
-            if boundary > start + hard_max // 2:
-                end = boundary + 1
-        parts.append(paragraph[start:end].strip())
-        if end >= len(paragraph):
-            break
-        start = max(end - safe_overlap, start + 1)
-
-    return [part for part in parts if part]
-
-
-def split_logical_unit_text(text: str, hard_max: int, overlap: int) -> list[str]:
-    if len(text) <= hard_max:
-        return [text]
-
-    blocks = split_paragraphs_preserving_lists(text)
-    parts: list[str] = []
-    current: list[str] = []
-    current_len = 0
-
-    def flush() -> None:
-        nonlocal current, current_len
-        if current:
-            parts.append("\n\n".join(current).strip())
-        current = []
-        current_len = 0
-
-    for block in blocks:
-        block_parts = split_oversized_paragraph(block, hard_max=hard_max, overlap=overlap)
-        for block_part in block_parts:
-            candidate_len = current_len + len(block_part) + (2 if current else 0)
-            if current and candidate_len > hard_max:
-                flush()
-            current.append(block_part)
-            current_len = sum(len(item) for item in current) + max(0, len(current) - 1) * 2
-
-    flush()
-
-    if len(parts) <= 1:
-        return parts
-
-    safe_overlap = max(0, min(overlap, 250))
-    if safe_overlap <= 0:
-        return parts
-
-    overlapped: list[str] = [parts[0]]
-    for part in parts[1:]:
-        previous_tail = parts[len(overlapped) - 1][-safe_overlap:].strip()
-        if previous_tail and len(previous_tail) + len(part) + 2 <= hard_max:
-            overlapped.append(f"{previous_tail}\n\n{part}")
-        else:
-            overlapped.append(part)
-    return overlapped
-
-
-def prepare_chunks(
-    *,
-    document: SemanticDocument,
-    profile: DocumentProfile,
-    units: list[LogicalUnit],
-    chunk_size: int,
-    chunk_overlap: int,
-) -> list[PreparedChunk]:
-    if chunk_size <= 0:
-        raise ValueError("chunk_size must be greater than 0")
-    if chunk_overlap < 0:
-        raise ValueError("chunk_overlap must not be negative")
-    if chunk_overlap >= HARD_MAX_CHARS:
-        raise ValueError("chunk_overlap must be smaller than hard max")
-
-    hard_max = min(max(chunk_size, 800), HARD_MAX_CHARS)
-    prepared: list[PreparedChunk] = []
-
-    split_units: list[tuple[LogicalUnit, list[str]]] = [
-        (unit, split_logical_unit_text(unit.text, hard_max=hard_max, overlap=chunk_overlap))
-        for unit in units
-    ]
-    chunk_count = sum(len(parts) for _, parts in split_units)
-    chunk_index = 0
-
-    for unit, parts in split_units:
-        part_count = len(parts)
-        for part_index, text in enumerate(parts, start=1):
-            chunk_index += 1
-            warnings = list(profile.warnings) + list(unit.warnings)
-            if part_count > 1:
-                warnings.append("Logical unit was split into linked parts because it exceeded hard max.")
-
-            hash_value = content_hash(text)
-            metadata = {
-                "namespace": NAMESPACE,
-                "doc_type": profile.doc_type,
-                "source_file": document.path.name,
-                "relative_path": document.relative_path,
-                "title": profile.title,
-                "section": unit.section,
-                "section_path": unit.section_path,
-                "page_start": unit.page_start,
-                "page_end": unit.page_end,
-                "chunk_index": chunk_index,
-                "chunk_count": chunk_count,
-                "logical_unit_id": unit.logical_unit_id,
-                "logical_unit_type": unit.logical_unit_type,
-                "logical_unit_title": unit.title,
-                "part_index": part_index,
-                "part_count": part_count,
-                "parent_section": unit.parent_section,
-                "chunking_strategy": "semantic_structural",
-                "loader_version": LOADER_VERSION,
-                "content_hash": hash_value,
-                "structure_quality": profile.structure_quality,
-                "warnings": sorted(set(warnings)),
-            }
-            prepared.append(PreparedChunk(text=text, metadata=metadata))
-
-    return prepared
-
-
-def semantic_chunk_exists(db_path: Path, source_file: str, hash_value: str) -> bool:
-    if not db_path.exists():
+def is_under(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+    except ValueError:
         return False
+    return True
 
+
+def load_jsonl(path: Path, result: ValidationResult) -> list[tuple[int, dict[str, Any]]]:
+    if not path.exists():
+        result.errors.append(f"Curated file does not exist: {display_path(path)}")
+        return []
+
+    rows: list[tuple[int, dict[str, Any]]] = []
+    with path.open("r", encoding="utf-8") as file:
+        for line_number, raw_line in enumerate(file, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                result.errors.append(f"Line {line_number}: invalid JSON: {exc}")
+                continue
+            if not isinstance(value, dict):
+                result.errors.append(f"Line {line_number}: JSON value must be an object.")
+                continue
+            rows.append((line_number, value))
+
+    if not rows:
+        result.errors.append(f"Curated file has no chunks: {display_path(path)}")
+    return rows
+
+
+def validate_int_field(
+    chunk: dict[str, Any],
+    field_name: str,
+    line_number: int,
+    result: ValidationResult,
+    *,
+    allow_none: bool = False,
+) -> int | None:
+    value = chunk.get(field_name)
+    if value is None and allow_none:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        result.errors.append(f"Line {line_number}: {field_name} must be an integer.")
+        return None
+    return value
+
+
+def validate_chunk(
+    chunk: dict[str, Any],
+    line_number: int,
+    result: ValidationResult,
+    raw_docs_dir: Path = RAW_DOCS_DIR,
+) -> dict[str, Any] | None:
+    missing = sorted(REQUIRED_FIELDS - chunk.keys())
+    if missing:
+        result.errors.append(f"Line {line_number}: missing fields: {', '.join(missing)}")
+        return None
+
+    namespace = chunk.get("namespace")
+    if namespace != NAMESPACE:
+        result.errors.append(f"Line {line_number}: namespace must be {NAMESPACE!r}, got {namespace!r}.")
+
+    doc_type = chunk.get("doc_type")
+    if doc_type not in ALLOWED_DOC_TYPES:
+        result.errors.append(f"Line {line_number}: unsupported doc_type: {doc_type!r}.")
+
+    logical_unit_type = chunk.get("logical_unit_type")
+    if logical_unit_type not in ALLOWED_LOGICAL_UNIT_TYPES:
+        result.errors.append(
+            f"Line {line_number}: unsupported logical_unit_type: {logical_unit_type!r}."
+        )
+
+    text = chunk.get("text")
+    if not isinstance(text, str) or not text.strip():
+        result.errors.append(f"Line {line_number}: text must be a non-empty string.")
+
+    for field_name in (
+        "title",
+        "source_file",
+        "relative_path",
+        "section",
+        "section_path",
+        "logical_unit_title",
+    ):
+        if not isinstance(chunk.get(field_name), str) or not chunk[field_name].strip():
+            result.errors.append(f"Line {line_number}: {field_name} must be a non-empty string.")
+
+    tags = chunk.get("tags")
+    if not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
+        result.errors.append(f"Line {line_number}: tags must be a list of strings.")
+
+    notes = chunk.get("notes")
+    if notes is not None and not isinstance(notes, str):
+        result.errors.append(f"Line {line_number}: notes must be a string.")
+
+    part_index = validate_int_field(chunk, "part_index", line_number, result)
+    part_count = validate_int_field(chunk, "part_count", line_number, result)
+    page_start = validate_int_field(chunk, "page_start", line_number, result, allow_none=True)
+    page_end = validate_int_field(chunk, "page_end", line_number, result, allow_none=True)
+
+    if part_index is not None and part_index < 1:
+        result.errors.append(f"Line {line_number}: part_index must be >= 1.")
+    if part_count is not None and part_index is not None and part_count < part_index:
+        result.errors.append(f"Line {line_number}: part_count must be >= part_index.")
+    if page_start is not None and page_end is not None and page_end < page_start:
+        result.errors.append(f"Line {line_number}: page_end must be >= page_start.")
+
+    relative_path = chunk.get("relative_path")
+    if isinstance(relative_path, str):
+        source_path = project_path(relative_path)
+        if not source_path.exists():
+            result.errors.append(f"Line {line_number}: relative_path does not exist: {relative_path}")
+        elif not is_under(source_path, raw_docs_dir):
+            result.errors.append(f"Line {line_number}: relative_path must point inside data/raw_docs.")
+        elif source_path.name != chunk.get("source_file"):
+            result.errors.append(
+                f"Line {line_number}: source_file does not match relative_path filename."
+            )
+        elif source_path.suffix.lower() == ".pdf" and (page_start is None or page_end is None):
+            result.warnings.append(
+                f"Line {line_number}: PDF chunk has no page_start/page_end: {chunk.get('source_file')}"
+            )
+
+    text_length = len(text.strip()) if isinstance(text, str) else 0
+    if text_length and text_length < 80 and not str(chunk.get("notes") or "").strip():
+        result.errors.append(
+            f"Line {line_number}: text is very short ({text_length} chars) without notes."
+        )
+    if text_length > 3000 and not str(chunk.get("notes") or "").strip():
+        result.errors.append(
+            f"Line {line_number}: text is too long ({text_length} chars) without notes."
+        )
+
+    if result.errors and any(error.startswith(f"Line {line_number}:") for error in result.errors):
+        return None
+
+    normalized = dict(chunk)
+    normalized["namespace"] = NAMESPACE
+    normalized["text"] = text.strip()
+    normalized["notes"] = str(chunk.get("notes") or "")
+    normalized["content_hash"] = compute_content_hash(
+        text=normalized["text"],
+        source_file=str(normalized["source_file"]),
+        namespace=NAMESPACE,
+    )
+    return normalized
+
+
+def validate_curated_chunks(
+    curated_path: Path = DEFAULT_CURATED_PATH,
+    raw_docs_dir: Path = RAW_DOCS_DIR,
+) -> ValidationResult:
+    result = ValidationResult()
+    rows = load_jsonl(curated_path, result)
+    seen: set[tuple[str, str, str]] = set()
+    part_groups: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+
+    for line_number, chunk in rows:
+        normalized = validate_chunk(chunk, line_number, result, raw_docs_dir=raw_docs_dir)
+        if normalized is None:
+            continue
+
+        key = (
+            normalized["namespace"],
+            normalized["source_file"],
+            normalized["content_hash"],
+        )
+        if key in seen:
+            result.errors.append(
+                f"Line {line_number}: duplicate chunk by namespace/source_file/content_hash."
+            )
+            continue
+        seen.add(key)
+
+        if int(normalized["part_count"]) > 1:
+            group_key = (
+                normalized["source_file"],
+                normalized["section_path"],
+                normalized["logical_unit_title"],
+            )
+            part_groups[group_key].append(normalized)
+
+        result.chunks.append(normalized)
+
+    for group_key, parts in part_groups.items():
+        expected_count = int(parts[0]["part_count"])
+        indexes = sorted(int(part["part_index"]) for part in parts)
+        if any(int(part["part_count"]) != expected_count for part in parts):
+            result.errors.append(
+                f"Multipart unit has inconsistent part_count: {group_key[0]} | {group_key[2]}"
+            )
+        if indexes != list(range(1, expected_count + 1)):
+            result.errors.append(
+                f"Multipart unit has missing/duplicate part_index values: {group_key[0]} | {group_key[2]}"
+            )
+
+    return result
+
+
+def existing_content_hashes(db_path: Path) -> set[tuple[str, str, str]]:
+    if not db_path.exists():
+        return set()
+
+    hashes: set[tuple[str, str, str]] = set()
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
         rows = connection.execute(
             """
-            SELECT metadata_json
+            SELECT namespace, metadata_json
             FROM memory_chunks
             WHERE namespace = ?
             """,
@@ -972,241 +361,221 @@ def semantic_chunk_exists(db_path: Path, source_file: str, hash_value: str) -> b
         ).fetchall()
 
     for row in rows:
-        metadata_json = row["metadata_json"]
-        if not metadata_json:
+        if not row["metadata_json"]:
             continue
         try:
-            metadata = json.loads(metadata_json)
+            metadata = json.loads(row["metadata_json"])
         except json.JSONDecodeError:
             continue
-        if metadata.get("source_file") == source_file and metadata.get("content_hash") == hash_value:
-            return True
+        source_file = metadata.get("source_file")
+        hash_value = metadata.get("content_hash")
+        if source_file and hash_value:
+            hashes.add((row["namespace"], str(source_file), str(hash_value)))
 
-    return False
+    return hashes
 
 
-def add_chunks_to_store(
+def metadata_for_chunk(chunk: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "namespace": NAMESPACE,
+        "doc_type": chunk["doc_type"],
+        "source_file": chunk["source_file"],
+        "relative_path": chunk["relative_path"],
+        "title": chunk["title"],
+        "section": chunk["section"],
+        "section_path": chunk["section_path"],
+        "page_start": chunk["page_start"],
+        "page_end": chunk["page_end"],
+        "logical_unit_type": chunk["logical_unit_type"],
+        "logical_unit_title": chunk["logical_unit_title"],
+        "part_index": chunk["part_index"],
+        "part_count": chunk["part_count"],
+        "tags": chunk["tags"],
+        "notes": chunk["notes"],
+        "chunking_strategy": CHUNKING_STRATEGY,
+        "loader_version": LOADER_VERSION,
+        "content_hash": chunk["content_hash"],
+    }
+
+
+def import_curated_chunks(
     *,
-    store: MemoryStore,
-    db_path: Path,
-    chunks: list[PreparedChunk],
-    force: bool,
-) -> tuple[int, int]:
+    curated_path: Path = DEFAULT_CURATED_PATH,
+    db_path: Path = DEFAULT_DB_PATH,
+    raw_docs_dir: Path = RAW_DOCS_DIR,
+) -> dict[str, Any]:
+    validation = validate_curated_chunks(curated_path, raw_docs_dir=raw_docs_dir)
+    if not validation.ok:
+        print_validation(validation)
+        raise SystemExit("Curated validation failed; import aborted.")
+
+    store = MemoryStore(str(db_path))
+    store.ensure_schema()
+    existing = existing_content_hashes(db_path)
     added = 0
     duplicates = 0
+    errors: list[str] = []
 
-    for chunk in chunks:
-        metadata = chunk.metadata
-        if not force and semantic_chunk_exists(
-            db_path,
-            source_file=str(metadata["source_file"]),
-            hash_value=str(metadata["content_hash"]),
-        ):
+    for chunk in validation.chunks:
+        key = (NAMESPACE, chunk["source_file"], chunk["content_hash"])
+        if key in existing:
             duplicates += 1
             continue
 
-        store.add_chunk(
-            namespace=NAMESPACE,
-            doc_type=str(metadata["doc_type"]),
-            title=str(metadata["title"]),
-            text=chunk.text,
-            source=str(metadata["relative_path"]),
-            page=metadata["page_start"],
-            section=str(metadata["section"]),
-            metadata=metadata,
-        )
-        added += 1
-
-    return added, duplicates
-
-
-def write_preview(chunks: list[PreparedChunk], preview_path: Path = DEFAULT_PREVIEW_PATH) -> Path:
-    preview_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with preview_path.open("w", encoding="utf-8") as file:
-        for chunk in chunks:
-            metadata = chunk.metadata
-            preview = {
-                "source_file": metadata["source_file"],
-                "relative_path": metadata["relative_path"],
-                "title": metadata["title"],
-                "doc_type": metadata["doc_type"],
-                "namespace": metadata["namespace"],
-                "section": metadata["section"],
-                "section_path": metadata["section_path"],
-                "chunk_index": metadata["chunk_index"],
-                "chunk_count": metadata["chunk_count"],
-                "logical_unit_id": metadata["logical_unit_id"],
-                "logical_unit_type": metadata["logical_unit_type"],
-                "logical_unit_title": metadata["logical_unit_title"],
-                "part_index": metadata["part_index"],
-                "part_count": metadata["part_count"],
-                "parent_section": metadata["parent_section"],
-                "page_start": metadata["page_start"],
-                "page_end": metadata["page_end"],
-                "chunking_strategy": metadata["chunking_strategy"],
-                "loader_version": metadata["loader_version"],
-                "content_hash": metadata["content_hash"],
-                "structure_quality": metadata["structure_quality"],
-                "text_length": len(chunk.text),
-                "text_preview": chunk.text[:500],
-                "warnings": metadata["warnings"],
-            }
-            file.write(json.dumps(preview, ensure_ascii=False) + "\n")
-
-    return preview_path
-
-
-def print_document_report(
-    *,
-    profile: DocumentProfile,
-    chunk_count: int,
-    added_count: int | None = None,
-    duplicate_count: int | None = None,
-) -> None:
-    print(f"\nDocument: {profile.source_file}")
-    print(f"  doc_type: {profile.doc_type}")
-    print(f"  title: {profile.title}")
-    print(f"  page_count: {profile.page_count}")
-    print(f"  structure_quality: {profile.structure_quality}")
-    print(f"  sections: {len(profile.detected_sections)}")
-    print(f"  logical_units: {len(profile.logical_units)}")
-    print(f"  chunks: {chunk_count}")
-    if added_count is not None:
-        print(f"  added: {added_count}")
-    if duplicate_count is not None:
-        print(f"  duplicates_skipped: {duplicate_count}")
-    if profile.detected_sections:
-        print("  first_section_paths:")
-        for section_path in profile.detected_sections[:3]:
-            print(f"    - {section_path}")
-    if profile.warnings:
-        print("  warnings:")
-        for warning in profile.warnings:
-            print(f"    - {warning}")
-
-
-def profile_to_printable(profile: DocumentProfile) -> dict[str, Any]:
-    value = asdict(profile)
-    value["logical_units"] = value["logical_units"][:20]
-    return value
-
-
-def ingest_directory(
-    *,
-    raw_dir: Path = DEFAULT_RAW_DIR,
-    db_path: Path = DEFAULT_DB_PATH,
-    chunk_size: int = 1800,
-    chunk_overlap: int = 200,
-    dry_run: bool = False,
-    force: bool = False,
-    verbose: bool = False,
-    profile_only: bool = False,
-    write_preview_file: bool = False,
-) -> dict[str, Any]:
-    """Profile, chunk and optionally load supported documents into semantic memory."""
-    documents = iter_semantic_documents(raw_dir, verbose=verbose)
-
-    if not documents:
-        print(f"No .txt, .md or .pdf documents found in {raw_dir}")
-        return {
-            "files_found": 0,
-            "files_processed": 0,
-            "chunks_built": 0,
-            "chunks_added": 0,
-            "duplicates_skipped": 0,
-            "poor_structure_documents": 0,
-            "preview_path": None,
-            "profiles": [],
-        }
-
-    store: MemoryStore | None = None
-    if not dry_run and not profile_only:
-        store = MemoryStore(str(db_path))
-        store.ensure_schema()
-
-    all_chunks: list[PreparedChunk] = []
-    profiles: list[DocumentProfile] = []
-    chunks_added = 0
-    duplicates_skipped = 0
-    poor_structure_documents = 0
-
-    for document in documents:
-        profile, units = build_profile(document)
-        profiles.append(profile)
-        if profile.structure_quality == "poor":
-            poor_structure_documents += 1
-
-        if profile_only:
-            print(json.dumps(profile_to_printable(profile), ensure_ascii=False, indent=2))
-            print_document_report(profile=profile, chunk_count=0)
+        try:
+            store.add_chunk(
+                namespace=NAMESPACE,
+                doc_type=str(chunk["doc_type"]),
+                title=str(chunk["title"]),
+                text=str(chunk["text"]),
+                source=str(chunk["relative_path"]),
+                page=chunk["page_start"],
+                section=str(chunk["section"]),
+                metadata=metadata_for_chunk(chunk),
+            )
+        except Exception as exc:  # pragma: no cover - defensive reporting
+            errors.append(f"{chunk['source_file']} | {chunk['section']}: {exc}")
             continue
 
-        chunks = prepare_chunks(
-            document=document,
-            profile=profile,
-            units=units,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-        )
-        all_chunks.extend(chunks)
+        added += 1
+        existing.add(key)
 
-        added = 0
-        duplicates = 0
-        if store is not None:
-            added, duplicates = add_chunks_to_store(
-                store=store,
-                db_path=db_path,
-                chunks=chunks,
-                force=force,
-            )
-            chunks_added += added
-            duplicates_skipped += duplicates
-
-        print_document_report(
-            profile=profile,
-            chunk_count=len(chunks),
-            added_count=None if dry_run else added,
-            duplicate_count=None if dry_run else duplicates,
-        )
-
-    preview_path: Path | None = None
-    if write_preview_file and not profile_only:
-        preview_path = write_preview(all_chunks)
-
-    summary = {
-        "files_found": len(documents),
-        "files_processed": len(profiles),
-        "chunks_built": len(all_chunks),
-        "chunks_added": chunks_added,
-        "duplicates_skipped": duplicates_skipped,
-        "poor_structure_documents": poor_structure_documents,
-        "preview_path": str(preview_path) if preview_path else None,
-        "profiles": profiles,
+    semantic_count = count_semantic_chunks(db_path)
+    db_size = db_path.stat().st_size if db_path.exists() else 0
+    report = {
+        "curated_path": display_path(curated_path),
+        "db_path": display_path(db_path),
+        "curated_chunks": len(validation.chunks),
+        "chunks_added": added,
+        "duplicates_skipped": duplicates,
+        "errors": errors,
+        "db_size_bytes": db_size,
+        "semantic_chunks_in_db": semantic_count,
     }
+    write_import_report(report)
+    print_import_report(report)
+    if errors:
+        raise SystemExit("Import finished with errors.")
+    return report
 
-    print("\nSummary:")
-    print(f"  files_found: {summary['files_found']}")
-    print(f"  files_processed: {summary['files_processed']}")
-    print(f"  chunks_built: {summary['chunks_built']}")
-    print(f"  chunks_added: {summary['chunks_added']}")
-    print(f"  duplicates_skipped: {summary['duplicates_skipped']}")
-    print(f"  poor_structure_documents: {summary['poor_structure_documents']}")
-    if preview_path:
-        print(f"  preview_path: {preview_path}")
 
-    return summary
+def count_semantic_chunks(db_path: Path) -> int:
+    if not db_path.exists():
+        return 0
+    with sqlite3.connect(db_path) as connection:
+        return int(
+            connection.execute(
+                "SELECT COUNT(*) FROM memory_chunks WHERE namespace = ?",
+                (NAMESPACE,),
+            ).fetchone()[0]
+        )
+
+
+def write_import_report(report: dict[str, Any]) -> None:
+    path = SEMANTIC_INDEX_DIR / "import_report.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def print_validation(result: ValidationResult) -> None:
+    print("Curated validation:")
+    print(f"  chunks: {len(result.chunks)}")
+    print(f"  errors: {len(result.errors)}")
+    print(f"  warnings: {len(result.warnings)}")
+    for error in result.errors:
+        print(f"  ERROR: {error}")
+    for warning in result.warnings:
+        print(f"  WARNING: {warning}")
+
+
+def print_dry_run(result: ValidationResult) -> None:
+    by_source = Counter(chunk["source_file"] for chunk in result.chunks)
+    by_doc_type = Counter(chunk["doc_type"] for chunk in result.chunks)
+    by_unit_type = Counter(chunk["logical_unit_type"] for chunk in result.chunks)
+
+    print_validation(result)
+    if not result.ok:
+        raise SystemExit("Curated validation failed; dry-run aborted.")
+
+    print("\nDry-run summary:")
+    print(f"  curated_chunks: {len(result.chunks)}")
+    print("  chunks_by_source:")
+    for source_file, count in sorted(by_source.items()):
+        print(f"    - {source_file}: {count}")
+    print("  doc_types:")
+    for doc_type, count in sorted(by_doc_type.items()):
+        print(f"    - {doc_type}: {count}")
+    print("  logical_unit_types:")
+    for unit_type, count in sorted(by_unit_type.items()):
+        print(f"    - {unit_type}: {count}")
+
+
+def print_import_report(report: dict[str, Any]) -> None:
+    print("Curated import:")
+    print(f"  curated_chunks: {report['curated_chunks']}")
+    print(f"  chunks_added: {report['chunks_added']}")
+    print(f"  duplicates_skipped: {report['duplicates_skipped']}")
+    print(f"  errors: {len(report['errors'])}")
+    print(f"  db_path: {report['db_path']}")
+    print(f"  db_size_bytes: {report['db_size_bytes']}")
+    print(f"  semantic_chunks_in_db: {report['semantic_chunks_in_db']}")
+    for error in report["errors"]:
+        print(f"  ERROR: {error}")
+
+
+def reset_state() -> list[Path]:
+    deleted: list[Path] = []
+    for path in RESET_FILES:
+        if path.name == ".gitkeep":
+            continue
+        if path.exists() and path.is_file():
+            path.unlink()
+            deleted.append(path)
+
+    for pattern in RESET_PATTERNS:
+        for path in pattern.parent.glob(pattern.name):
+            if path.name == ".gitkeep":
+                continue
+            if path.is_file():
+                path.unlink()
+                deleted.append(path)
+
+    for path in RESET_DIRS:
+        if path.exists() and path.is_dir():
+            shutil.rmtree(path)
+            deleted.append(path)
+
+    print("Reset state:")
+    if deleted:
+        for path in deleted:
+            print(f"  deleted: {display_path(path)}")
+    else:
+        print("  no active local artifacts found")
+
+    protected = (
+        RAW_DOCS_DIR,
+        RAW_DOCS_DIR / ".gitkeep",
+        SEMANTIC_INDEX_DIR / ".gitkeep",
+        PROJECT_ROOT / "data" / "memory" / ".gitkeep",
+    )
+    for path in protected:
+        if path.exists():
+            print(f"  kept: {display_path(path)}")
+    return deleted
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Load local semantic documents from data/raw_docs into LineHelper semantic memory."
+        description=(
+            "Validate, dry-run, reset, or import Codex-curated semantic chunks "
+            "from data/semantic_index/curated_chunks.jsonl."
+        )
     )
     parser.add_argument(
-        "--raw-dir",
+        "--curated-path",
         type=Path,
-        default=DEFAULT_RAW_DIR,
-        help="Folder with local semantic documents.",
+        default=DEFAULT_CURATED_PATH,
+        help="Path to curated JSONL chunks.",
     )
     parser.add_argument(
         "--db-path",
@@ -1215,58 +584,61 @@ def parse_args() -> argparse.Namespace:
         help="SQLite memory database path.",
     )
     parser.add_argument(
-        "--chunk-size",
-        type=int,
-        default=1800,
-        help="Target chunk size in characters; hard max is 2400.",
-    )
-    parser.add_argument(
-        "--chunk-overlap",
-        type=int,
-        default=200,
-        help="Overlap for forced splits of one logical unit.",
+        "--validate-curated",
+        action="store_true",
+        help="Validate curated JSONL and exit with non-zero status on errors.",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Build profiles and chunks without writing to the database.",
+        help="Validate and print curated import summary without writing to the database.",
     )
     parser.add_argument(
-        "--force",
+        "--import-curated",
         action="store_true",
-        help="Add chunks even when the same source_file/content_hash already exists.",
+        help="Validate and import curated chunks into MemoryStore.",
     )
     parser.add_argument(
-        "--verbose",
+        "--reset-state",
         action="store_true",
-        help="Print extra loader messages.",
-    )
-    parser.add_argument(
-        "--profile-only",
-        action="store_true",
-        help="Analyze documents and print profiles without building chunks or writing to the database.",
-    )
-    parser.add_argument(
-        "--write-preview",
-        action="store_true",
-        help="Write chunk preview to data/semantic_index/chunk_preview.jsonl.",
+        help="Delete active local DB/preview/temp artifacts without touching raw docs or .gitkeep.",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    ingest_directory(
-        raw_dir=args.raw_dir,
-        db_path=args.db_path,
-        chunk_size=args.chunk_size,
-        chunk_overlap=args.chunk_overlap,
-        dry_run=args.dry_run,
-        force=args.force,
-        verbose=args.verbose,
-        profile_only=args.profile_only,
-        write_preview_file=args.write_preview,
-    )
+    actions = [
+        args.validate_curated,
+        args.dry_run,
+        args.import_curated,
+        args.reset_state,
+    ]
+    if sum(bool(action) for action in actions) != 1:
+        raise SystemExit(
+            "Choose exactly one action: --validate-curated, --dry-run, "
+            "--import-curated, or --reset-state."
+        )
+
+    curated_path = project_path(args.curated_path)
+    db_path = project_path(args.db_path)
+
+    if args.reset_state:
+        reset_state()
+        return
+
+    result = validate_curated_chunks(curated_path)
+    if args.validate_curated:
+        print_validation(result)
+        if not result.ok:
+            raise SystemExit(1)
+        return
+
+    if args.dry_run:
+        print_dry_run(result)
+        return
+
+    import_curated_chunks(curated_path=curated_path, db_path=db_path)
 
 
 if __name__ == "__main__":
