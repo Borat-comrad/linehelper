@@ -43,10 +43,15 @@ def test_empty_retrieval_does_not_call_llm() -> None:
 
     result = generator.answer("Нет ли ответа?")
 
-    assert result.answer == "В базе знаний не найдено релевантных источников."
+    assert result.answer == (
+        "В базе знаний Serviceline нет ответа на этот вопрос. "
+        "Похоже, вопрос не относится к корпоративным регламентам, инструкциям, "
+        "оргструктуре или документообороту."
+    )
     assert result.sources == []
     assert result.chunks_used == 0
     assert result.prompt_length == 0
+    assert result.response_kind == "no_answer"
     assert client.messages == []
 
 
@@ -105,6 +110,129 @@ def test_vacation_question_filters_noisy_context_chunks() -> None:
     assert "Инструкция - Как начать работу в новой должности" not in prompt
 
 
+def test_company_question_prefers_goals_and_ckp_context() -> None:
+    company_goal = _chunk_with(
+        title="ИП-0002 Цели и замыслы компании Serviceline",
+        section="Основная цель компании",
+        text="Основная цель компании Serviceline описывает общий смысл деятельности.",
+        final_score=95.0,
+    )
+    company_ckp = _chunk_with(
+        title="ИП-0003 ЦКП SERVICELINE",
+        section="Ценный конечный продукт",
+        text="ЦКП SERVICELINE описывает ценный конечный продукт компании.",
+        final_score=90.0,
+    )
+    procurement_noise = _chunk_with(
+        title="2026-03-03_Оргсхема",
+        section="Отделение закупки",
+        text="Отделение закупки занимается работой с поставщиками.",
+        final_score=120.0,
+    )
+    client = FakeClient("Компания описана через цели и ЦКП.")
+    generator = RagAnswerGenerator(
+        retriever=FakeRetriever([procurement_noise, company_goal, company_ckp]),
+        llm_client=client,
+    )
+
+    result = generator.answer("Чем занимается компания?")
+    prompt = client.messages[-1]["content"]
+
+    assert result.chunks_used == 2
+    assert [source.title for source in result.sources] == [
+        "ИП-0002 Цели и замыслы компании Serviceline",
+        "ИП-0003 ЦКП SERVICELINE",
+    ]
+    assert "ИП-0002 Цели и замыслы компании Serviceline" in prompt
+    assert "ИП-0003 ЦКП SERVICELINE" in prompt
+    assert "Отделение закупки" not in prompt
+
+
+def test_document_flow_question_prefers_document_flow_context() -> None:
+    document_flow = _chunk_with(
+        title="ИП-0006 Документооборот",
+        section="Документооборот в компании",
+        text="Документооборот описывает работу с документами и согласованиями в 1С ДО.",
+        final_score=88.0,
+    )
+    approval_instruction = _chunk_with(
+        title="Инструкция Согласования в Документообороте",
+        section="Согласование документа",
+        text="Инструкция описывает согласование документов в Документообороте.",
+        final_score=82.0,
+    )
+    role_noise = _chunk_with(
+        title="Инструкция - Как начать работу в новой должности",
+        section="Должностная папка",
+        text="Сотрудник изучает должностную папку и рабочий стол.",
+        final_score=110.0,
+    )
+    client = FakeClient("Документооборот описан в ИП-0006.")
+    generator = RagAnswerGenerator(
+        retriever=FakeRetriever([role_noise, document_flow, approval_instruction]),
+        llm_client=client,
+    )
+
+    result = generator.answer("как работает документооборот в компании?")
+    prompt = client.messages[-1]["content"]
+
+    assert result.chunks_used == 2
+    assert [source.title for source in result.sources] == [
+        "ИП-0006 Документооборот",
+        "Инструкция Согласования в Документообороте",
+    ]
+    assert "ИП-0006 Документооборот" in prompt
+    assert "Должностная папка" not in prompt
+
+
+def test_off_topic_question_returns_no_answer_without_sources_or_llm() -> None:
+    weak_noise = [
+        _chunk_with(
+            title="Регламент по статистикам",
+            section="Падающая статистика",
+            text="Руководитель анализирует статистики.",
+            final_score=14.0,
+        ),
+        _chunk_with(
+            title="Рабочий стол",
+            section="Планирование",
+            text="Сотрудник ведет рабочий стол и задачи.",
+            final_score=11.0,
+        ),
+    ]
+    client = FakeClient("unused")
+    generator = RagAnswerGenerator(
+        retriever=FakeRetriever(weak_noise),
+        llm_client=client,
+    )
+
+    result = generator.answer("сколько маленьких утят, после бега есть хотят?")
+
+    assert result.response_kind == "no_answer"
+    assert result.sources == []
+    assert result.chunks_used == 0
+    assert result.prompt_length == 0
+    assert result.diagnostic_candidates
+    assert "нет ответа" in result.answer
+    assert client.messages == []
+
+
+def test_kp_question_asks_clarification_without_llm() -> None:
+    client = FakeClient("unused")
+    retriever = FakeRetriever([_chunk()])
+    generator = RagAnswerGenerator(retriever=retriever, llm_client=client)
+
+    result = generator.answer("Что такое КП?")
+
+    assert result.response_kind == "clarification"
+    assert result.sources == []
+    assert result.chunks_used == 0
+    assert "коммерческое предложение" in result.answer
+    assert "ЦКП" in result.answer
+    assert client.messages == []
+    assert retriever.calls == []
+
+
 def test_llm_error_is_wrapped() -> None:
     generator = RagAnswerGenerator(
         retriever=FakeRetriever([_chunk()]),
@@ -159,7 +287,7 @@ def _chunk() -> RetrievedChunk:
         title="Тестовый документ",
         section="Тестовый раздел",
         text="Тестовый текст для prompt builder.",
-        final_score=3.0,
+        final_score=50.0,
     )
 
 

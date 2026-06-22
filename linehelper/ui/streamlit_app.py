@@ -73,7 +73,7 @@ def main() -> None:
 
 def _render_result_details(result) -> None:
     if result.sources:
-        st.markdown("**Источники:**")
+        st.markdown("**Источники ответа:**")
         for index, source in enumerate(result.sources, start=1):
             page = f", стр. {source.page}" if source.page is not None else ""
             st.markdown(
@@ -82,7 +82,7 @@ def _render_result_details(result) -> None:
             if source.matched_excerpt:
                 st.caption(source.matched_excerpt)
     else:
-        st.info("В базе знаний не найдено релевантных источников.")
+        st.info("Релевантные источники ответа не найдены.")
 
     with st.expander("Диагностика"):
         st.write(f"Модель: {result.model}")
@@ -93,9 +93,22 @@ def _render_result_details(result) -> None:
         st.write(f"Candidate limit: {result.candidate_limit}")
         st.write(f"Context limit: {result.context_limit}")
         st.write(f"Context score ratio: {result.context_score_ratio}")
+        st.write(f"Response kind: {result.response_kind}")
         if result.sources:
-            st.write("Chunks:")
+            st.write("Chunks used as answer sources:")
             for source in result.sources:
+                st.write(
+                    {
+                        "title": source.title,
+                        "section": source.section,
+                        "logical_unit_title": source.logical_unit_title,
+                        "page": source.page,
+                        "score": source.score,
+                    }
+                )
+        if result.diagnostic_candidates:
+            st.write("Diagnostic candidates, not used as answer sources:")
+            for source in result.diagnostic_candidates:
                 st.write(
                     {
                         "title": source.title,

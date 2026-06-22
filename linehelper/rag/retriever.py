@@ -14,6 +14,36 @@ from linehelper.memory.memory_store import MemoryStore
 DEFAULT_MEMORY_DB_PATH = Path("data/memory/linehelper_memory.db")
 
 QUERY_EXPANSIONS: dict[str, list[str]] = {
+    "компания": [
+        "ИП-0002 Цели и замыслы компании Serviceline",
+        "ИП-0003 ЦКП SERVICELINE",
+        "цель компании",
+        "основная цель компании",
+        "ценный конечный продукт",
+        "комплексная услуга",
+    ],
+    "serviceline": [
+        "ИП-0002 Цели и замыслы компании Serviceline",
+        "ИП-0003 ЦКП SERVICELINE",
+        "цель компании",
+        "ЦКП SERVICELINE",
+    ],
+    "сервислайн": [
+        "ИП-0002 Цели и замыслы компании Serviceline",
+        "ИП-0003 ЦКП SERVICELINE",
+        "цель компании",
+        "ЦКП SERVICELINE",
+    ],
+    "документооборот": [
+        "ИП-0006 Документооборот",
+        "1С ДО",
+        "1С Документооборот",
+        "согласование",
+        "инструкция согласования",
+        "официальная переписка",
+    ],
+    "документоборот": ["ИП-0006 Документооборот", "1С ДО", "согласование"],
+    "согласование": ["Документооборот", "1С ДО", "инструкция согласования"],
     "зрс": ["завершенная работа сотрудника", "ситуация", "данные", "решение"],
     "цкп": ["ценный конечный продукт", "комплексная услуга"],
     "планирование": [
@@ -511,6 +541,48 @@ def _score_chunk(
             "профессиональный подбор",
             45.0,
             "target: professional selection in CKP",
+        ),
+        (
+            ("чем" in question_folded and "занимает" in question_folded and "компан" in question_folded)
+            or ("что" in question_folded and "делает" in question_folded and "компан" in question_folded)
+            or ("цель" in question_folded and "компан" in question_folded)
+            or "serviceline" in question_folded
+            or "сервислайн" in question_folded,
+            "ип-0002 цели и замыслы компании serviceline",
+            None,
+            95.0,
+            "target: company identity goals",
+        ),
+        (
+            ("чем" in question_folded and "занимает" in question_folded and "компан" in question_folded)
+            or ("что" in question_folded and "делает" in question_folded and "компан" in question_folded)
+            or ("цель" in question_folded and "компан" in question_folded)
+            or "serviceline" in question_folded
+            or "сервислайн" in question_folded,
+            "ип-0003 цкп serviceline",
+            None,
+            85.0,
+            "target: company identity CKP",
+        ),
+        (
+            "документооборот" in question_folded
+            or "документоборот" in question_folded
+            or "1с до" in question_folded
+            or ("соглас" in question_folded and "документ" in question_folded),
+            "ип-0006 документооборот",
+            None,
+            95.0,
+            "target: document flow policy",
+        ),
+        (
+            "документооборот" in question_folded
+            or "документоборот" in question_folded
+            or "1с до" in question_folded
+            or ("соглас" in question_folded and "документ" in question_folded),
+            "документооборот",
+            None,
+            55.0,
+            "target: document flow instruction",
         ),
         (
             "обязанност" in question_folded and "подчин" in question_folded and "зрс" in question_folded,

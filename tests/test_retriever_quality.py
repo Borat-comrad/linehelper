@@ -48,6 +48,16 @@ def test_domain_expansions_for_zrs_ckp_and_planning() -> None:
     assert "планирование на неделю" in planning
 
 
+def test_domain_expansions_for_company_and_document_flow() -> None:
+    company = expand_query_terms("Чем занимается компания?")
+    document_flow = expand_query_terms("как работает документооборот в компании?")
+
+    assert "ИП 0002 Цели и замыслы компании Serviceline" in company
+    assert "ИП 0003 ЦКП SERVICELINE" in company
+    assert "ИП 0006 Документооборот" in document_flow
+    assert "1С ДО" in document_flow
+
+
 def test_prompt_builder_uses_excerpt_for_long_chunk() -> None:
     chunk = RetrievedChunk(
         chunk_id=1,

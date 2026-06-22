@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -18,6 +19,18 @@ DEFAULT_RETRIEVAL_LIMIT = 5
 DEFAULT_CANDIDATE_LIMIT = 30
 DEFAULT_CONTEXT_LIMIT = 3
 DEFAULT_CONTEXT_SCORE_RATIO = 0.65
+MIN_GENERIC_CONTEXT_SCORE = 35.0
+NO_ANSWER_MESSAGE = (
+    "В базе знаний Serviceline нет ответа на этот вопрос. "
+    "Похоже, вопрос не относится к корпоративным регламентам, инструкциям, "
+    "оргструктуре или документообороту."
+)
+CLARIFY_KP_MESSAGE = (
+    "Вы имеете в виду КП как коммерческое предложение или ЦКП как ценный "
+    "конечный продукт компании? По КП как коммерческому предложению в semantic "
+    "memory может не быть источников. Если вы имеете в виду ЦКП, я буду "
+    "использовать ИП-0003 ЦКП SERVICELINE."
+)
 
 ANCHOR_TERMS: dict[str, tuple[str, ...]] = {
     "отпуск": ("отпуск", "отпуска", "отпуске", "отпусков", "отпускной"),
@@ -32,6 +45,63 @@ ANCHOR_TERMS: dict[str, tuple[str, ...]] = {
         "распоряжением",
     ),
 }
+
+INTENT_ANCHOR_TERMS: dict[str, tuple[str, ...]] = {
+    "company_identity": (
+        "ип-0002",
+        "цели и замыслы",
+        "цель компании",
+        "основная цель компании",
+        "ип-0003",
+        "цкп serviceline",
+        "ценный конечный продукт",
+        "комплексная услуга",
+    ),
+    "document_flow": (
+        "ип-0006",
+        "документооборот",
+        "1с до",
+        "1с документооборот",
+        "согласование",
+        "согласования",
+        "инструкция согласования",
+    ),
+    "ckp": (
+        "ип-0003",
+        "цкп serviceline",
+        "цкп",
+        "ценный конечный продукт",
+    ),
+}
+
+INTENT_PREFERRED_TERMS: dict[str, tuple[str, ...]] = {
+    "company_identity": (
+        "ип-0002",
+        "цели и замыслы",
+        "ип-0003",
+        "цкп serviceline",
+        "цель компании",
+        "основная цель компании",
+    ),
+    "document_flow": (
+        "ип-0006",
+        "документооборот",
+        "1с до",
+        "согласования",
+        "инструкция согласования",
+    ),
+    "ckp": (
+        "ип-0003",
+        "цкп serviceline",
+        "ценный конечный продукт",
+    ),
+}
+
+_TOKEN_RE = re.compile(r"[0-9A-Za-zА-Яа-яЁё_]+")
+_KP_RE = re.compile(
+    r"(?<![0-9A-Za-zА-Яа-яЁё])кп(?![0-9A-Za-zА-Яа-яЁё])",
+    re.IGNORECASE,
+)
 
 SYSTEM_MESSAGE = (
     "Ты корпоративный помощник Serviceline. Отвечай только на русском языке. "
@@ -67,6 +137,15 @@ class RagSource:
 
 
 @dataclass(frozen=True)
+class QueryIntent:
+    name: str
+    anchor_terms: tuple[str, ...] = ()
+    preferred_terms: tuple[str, ...] = ()
+    require_preferred_context: bool = False
+    min_context_score: float = MIN_GENERIC_CONTEXT_SCORE
+
+
+@dataclass(frozen=True)
 class RagAnswer:
     question: str
     answer: str
@@ -79,6 +158,8 @@ class RagAnswer:
     candidate_limit: int
     context_limit: int
     context_score_ratio: float
+    diagnostic_candidates: list[RagSource]
+    response_kind: str = "answer"
 
 
 class RagAnswerError(RuntimeError):
@@ -125,23 +206,11 @@ class RagAnswerGenerator:
             raise ValueError("question must not be empty")
 
         started_at = time.monotonic()
-        chunks = self.retriever.retrieve(
-            clean_question,
-            limit=retrieval_limit,
-            candidate_limit=candidate_limit,
-        )
-        context_chunks = select_context_chunks(
-            clean_question,
-            chunks,
-            max_chunks=self.context_limit,
-            score_ratio=self.context_score_ratio,
-        )
-        sources = [_source_from_chunk(chunk) for chunk in context_chunks]
-
-        if not context_chunks:
+        clarification = should_ask_clarification(clean_question)
+        if clarification is not None:
             return RagAnswer(
                 question=clean_question,
-                answer="В базе знаний не найдено релевантных источников.",
+                answer=clarification,
                 model=self.llm_client.model,
                 sources=[],
                 chunks_used=0,
@@ -151,6 +220,45 @@ class RagAnswerGenerator:
                 candidate_limit=candidate_limit,
                 context_limit=self.context_limit,
                 context_score_ratio=self.context_score_ratio,
+                diagnostic_candidates=[],
+                response_kind="clarification",
+            )
+
+        intent = detect_query_intent(clean_question)
+        chunks = self.retriever.retrieve(
+            clean_question,
+            limit=retrieval_limit,
+            candidate_limit=candidate_limit,
+        )
+        context_chunks = select_context_chunks(
+            clean_question,
+            chunks,
+            intent=intent,
+            max_chunks=self.context_limit,
+            score_ratio=self.context_score_ratio,
+        )
+        sources = [_source_from_chunk(chunk) for chunk in context_chunks]
+        diagnostic_candidates = [
+            _source_from_chunk(chunk)
+            for chunk in chunks
+            if chunk not in context_chunks
+        ]
+
+        if not context_chunks:
+            return RagAnswer(
+                question=clean_question,
+                answer=_no_answer_message(intent),
+                model=self.llm_client.model,
+                sources=[],
+                chunks_used=0,
+                prompt_length=0,
+                elapsed_seconds=round(time.monotonic() - started_at, 3),
+                retrieval_limit=retrieval_limit,
+                candidate_limit=candidate_limit,
+                context_limit=self.context_limit,
+                context_score_ratio=self.context_score_ratio,
+                diagnostic_candidates=diagnostic_candidates,
+                response_kind="no_answer",
             )
 
         prompt = build_rag_prompt(clean_question, context_chunks)
@@ -179,13 +287,71 @@ class RagAnswerGenerator:
             candidate_limit=candidate_limit,
             context_limit=self.context_limit,
             context_score_ratio=self.context_score_ratio,
+            diagnostic_candidates=diagnostic_candidates,
         )
+
+
+def detect_query_intent(question: str) -> QueryIntent:
+    """Detect a simple transparent query intent without external models."""
+    normalized = _normalize_for_match(question)
+
+    if _contains_any(
+        normalized,
+        (
+            "чем занимается компания",
+            "что делает компания",
+            "о компании",
+            "цель компании",
+            "serviceline",
+            "сервислайн",
+        ),
+    ):
+        return _intent("company_identity", require_preferred_context=True)
+
+    if _contains_any(
+        normalized,
+        (
+            "документооборот",
+            "документоборот",
+            "1с до",
+            "1с документооборот",
+            "согласование",
+            "создать документ",
+        ),
+    ):
+        return _intent("document_flow", require_preferred_context=True)
+
+    tokens = set(_tokens(normalized))
+    if "документ" in tokens or "документы" in tokens:
+        return _intent("document_flow", require_preferred_context=True)
+
+    if "цкп" in tokens:
+        return _intent("ckp", require_preferred_context=True)
+
+    if _contains_any(normalized, ANCHOR_TERMS["отпуск"]):
+        return _intent("vacation", anchor_terms=ANCHOR_TERMS["отпуск"])
+
+    if _contains_any(normalized, ANCHOR_TERMS["зрс"]):
+        return _intent("zrs", anchor_terms=ANCHOR_TERMS["зрс"])
+
+    return QueryIntent(name="unknown")
+
+
+def should_ask_clarification(question: str) -> str | None:
+    """Return a clarification answer for ambiguous short abbreviations."""
+    normalized = _normalize_for_match(question)
+    if "цкп" in normalized:
+        return None
+    if _KP_RE.search(normalized):
+        return CLARIFY_KP_MESSAGE
+    return None
 
 
 def select_context_chunks(
     question: str,
     chunks: Sequence[RetrievedChunk],
     *,
+    intent: QueryIntent | None = None,
     max_chunks: int = DEFAULT_CONTEXT_LIMIT,
     score_ratio: float = DEFAULT_CONTEXT_SCORE_RATIO,
 ) -> list[RetrievedChunk]:
@@ -196,8 +362,15 @@ def select_context_chunks(
     max_chunks = max(1, max_chunks)
     score_ratio = max(0.0, min(score_ratio, 1.0))
     candidates = list(chunks)
+    intent = intent or detect_query_intent(question)
 
-    anchor_terms = _active_anchor_terms(question)
+    preferred = _chunks_matching_terms(candidates, intent.preferred_terms)
+    if preferred:
+        candidates = preferred
+    elif intent.require_preferred_context:
+        return []
+
+    anchor_terms = _active_anchor_terms(question, intent=intent)
     if anchor_terms:
         anchored = [
             chunk
@@ -214,7 +387,28 @@ def select_context_chunks(
             chunk for chunk in candidates if _chunk_score(chunk) >= cutoff
         ]
 
+    if intent.name == "unknown" and candidates:
+        candidates = [
+            chunk
+            for chunk in candidates
+            if _chunk_score(chunk) >= intent.min_context_score
+        ]
+
     return candidates[:max_chunks]
+
+
+def _intent(
+    name: str,
+    *,
+    anchor_terms: tuple[str, ...] = (),
+    require_preferred_context: bool = False,
+) -> QueryIntent:
+    return QueryIntent(
+        name=name,
+        anchor_terms=anchor_terms or INTENT_ANCHOR_TERMS.get(name, ()),
+        preferred_terms=INTENT_PREFERRED_TERMS.get(name, ()),
+        require_preferred_context=require_preferred_context,
+    )
 
 
 def _source_from_chunk(chunk: RetrievedChunk) -> RagSource:
@@ -232,13 +426,16 @@ def _source_from_chunk(chunk: RetrievedChunk) -> RagSource:
     )
 
 
-def _active_anchor_terms(question: str) -> tuple[str, ...]:
+def _active_anchor_terms(question: str, *, intent: QueryIntent | None = None) -> tuple[str, ...]:
     normalized_question = _normalize_for_match(question)
     terms: list[str] = []
 
     for variants in ANCHOR_TERMS.values():
         if any(variant in normalized_question for variant in variants):
             terms.extend(variants)
+
+    if intent is not None:
+        terms.extend(intent.anchor_terms)
 
     return tuple(dict.fromkeys(terms))
 
@@ -250,8 +447,12 @@ def _chunk_contains_any_term(chunk: RetrievedChunk, terms: Sequence[str]) -> boo
             str(value or "")
             for value in (
                 chunk.title,
+                chunk.source,
                 chunk.section,
+                metadata.get("source_file"),
                 metadata.get("logical_unit_title"),
+                metadata.get("doc_type"),
+                " ".join(str(tag) for tag in metadata.get("tags", [])),
                 chunk.text,
             )
         )
@@ -264,6 +465,33 @@ def _chunk_score(chunk: RetrievedChunk) -> float:
     if score is None:
         return 0.0
     return float(score)
+
+
+def _chunks_matching_terms(
+    chunks: Sequence[RetrievedChunk],
+    terms: Sequence[str],
+) -> list[RetrievedChunk]:
+    if not terms:
+        return []
+    return [
+        chunk
+        for chunk in chunks
+        if _chunk_contains_any_term(chunk, terms)
+    ]
+
+
+def _no_answer_message(intent: QueryIntent) -> str:
+    if intent.name == "unknown":
+        return NO_ANSWER_MESSAGE
+    return "В базе знаний Serviceline не найдено достаточно релевантных источников для ответа на этот вопрос."
+
+
+def _contains_any(value: str, needles: Sequence[str]) -> bool:
+    return any(_normalize_for_match(needle) in value for needle in needles)
+
+
+def _tokens(value: str) -> list[str]:
+    return [token.casefold() for token in _TOKEN_RE.findall(value)]
 
 
 def _normalize_for_match(value: str) -> str:
