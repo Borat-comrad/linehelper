@@ -21,21 +21,38 @@ DEFAULT_CONTEXT_LIMIT = 3
 DEFAULT_CONTEXT_SCORE_RATIO = 0.65
 MIN_GENERIC_CONTEXT_SCORE = 35.0
 NO_ANSWER_MESSAGE = (
-    "В базе знаний Serviceline нет ответа на этот вопрос. "
+    "В базе знаний Serviceline нет точного ответа на этот вопрос. "
     "Похоже, вопрос не относится к корпоративным регламентам, инструкциям, "
     "оргструктуре или документообороту."
 )
 CLARIFY_KP_MESSAGE = (
-    "Вы имеете в виду КП как коммерческое предложение или ЦКП как ценный "
-    "конечный продукт компании? По КП как коммерческому предложению в semantic "
-    "memory может не быть источников. Если вы имеете в виду ЦКП, я буду "
-    "использовать ИП-0003 ЦКП SERVICELINE."
+    "Вы имеете в виду КП как коммерческое предложение или ЦКП как ценный конечный продукт компании?"
+)
+KP_COMMERCIAL_OFFER_MESSAGE = (
+    "В базе знаний нет отдельной полной инструкции по КП как коммерческому предложению. "
+    "В найденных источниках могут встречаться упоминания коммерческого предложения как продукта "
+    "отделов продаж, но этого недостаточно для полного ответа."
 )
 
 ANCHOR_TERMS: dict[str, tuple[str, ...]] = {
     "отпуск": ("отпуск", "отпуска", "отпуске", "отпусков", "отпускной"),
     "зрс": ("зрс", "завершенная работа сотрудника"),
     "цкп": ("цкп", "ценный конечный продукт"),
+    "задачи": (
+        "задача",
+        "задачу",
+        "задачи",
+        "задач",
+        "взять задачу в работу",
+        "работа с задачами",
+    ),
+    "контроль": (
+        "взять под контроль",
+        "под контроль",
+        "контроль",
+        "контроля",
+        "контролем",
+    ),
     "командировка": ("командировка", "командировки", "командировку"),
     "договор": ("договор", "договора", "договоров", "договоре"),
     "распоряжение": (
@@ -45,6 +62,14 @@ ANCHOR_TERMS: dict[str, tuple[str, ...]] = {
         "распоряжением",
     ),
 }
+
+COMPARISON_TRIGGERS: tuple[str, ...] = (
+    "это то же самое",
+    "то же самое",
+    "это отпуск",
+    "чем отличается",
+    "одно и то же",
+)
 
 INTENT_ANCHOR_TERMS: dict[str, tuple[str, ...]] = {
     "company_identity": (
@@ -102,6 +127,49 @@ _KP_RE = re.compile(
     r"(?<![0-9A-Za-zА-Яа-яЁё])кп(?![0-9A-Za-zА-Яа-яЁё])",
     re.IGNORECASE,
 )
+_TRAILING_SOURCE_BLOCK_RE = re.compile(
+    r"(?:\n\s*){1,}(?:источники ответа|источники|источник)\s*:\s*(?:\n|.)*\Z",
+    re.IGNORECASE,
+)
+_GENERIC_CONTEXT_STOP_WORDS = frozenset(
+    {
+        "без",
+        "бега",
+        "было",
+        "быть",
+        "вас",
+        "все",
+        "для",
+        "делать",
+        "если",
+        "есть",
+        "как",
+        "какие",
+        "какой",
+        "когда",
+        "мне",
+        "можно",
+        "надо",
+        "нужно",
+        "новая",
+        "нового",
+        "новое",
+        "новой",
+        "новый",
+        "после",
+        "получить",
+        "почему",
+        "работа",
+        "работать",
+        "работы",
+        "сделать",
+        "сколько",
+        "такое",
+        "хочу",
+        "что",
+        "чтобы",
+    }
+)
 
 SYSTEM_MESSAGE = (
     "Ты корпоративный помощник Serviceline. Отвечай только на русском языке. "
@@ -113,8 +181,11 @@ SYSTEM_MESSAGE = (
     "давай практические шаги только из источников. Игнорируй источники, которые "
     "не относятся к предмету вопроса, и не используй случайное совпадение слов "
     "как основание для ответа. Если источники дают только частичный ответ, "
-    "прямо скажи, чего в них нет. В конце кратко укажи, на какие источники "
-    "опирался."
+    "прямо скажи, чего в них нет. Если вопрос сравнивает два понятия или "
+    "действия, сначала ответь да или нет, затем кратко объясни различие по "
+    "источникам и не подменяй сравнение инструкцией по одной стороне. Не добавляй "
+    "в ответ раздел Источники и не перечисляй названия документов: интерфейс покажет "
+    "источники отдельно."
 )
 
 
@@ -230,12 +301,55 @@ class RagAnswerGenerator:
             limit=retrieval_limit,
             candidate_limit=candidate_limit,
         )
-        context_chunks = select_context_chunks(
+        if intent.name == "kp_commercial_offer":
+            return RagAnswer(
+                question=clean_question,
+                answer=KP_COMMERCIAL_OFFER_MESSAGE,
+                model=self.llm_client.model,
+                sources=[],
+                chunks_used=0,
+                prompt_length=0,
+                elapsed_seconds=round(time.monotonic() - started_at, 3),
+                retrieval_limit=retrieval_limit,
+                candidate_limit=candidate_limit,
+                context_limit=self.context_limit,
+                context_score_ratio=self.context_score_ratio,
+                diagnostic_candidates=[
+                    _source_from_chunk(chunk)
+                    for chunk in chunks
+                    if not _chunk_contains_any_term(chunk, INTENT_ANCHOR_TERMS["ckp"])
+                ],
+                response_kind="partial_answer",
+            )
+        if intent.name == "comparison":
+            chunks = sorted(
+                _dedupe_chunks(
+                    [
+                        *chunks,
+                        *self._retrieve_comparison_candidates(
+                            clean_question,
+                            candidate_limit=candidate_limit,
+                        ),
+                    ]
+                ),
+                key=_chunk_score,
+                reverse=True,
+            )
+        selected_context_chunks = select_context_chunks(
             clean_question,
             chunks,
             intent=intent,
             max_chunks=self.context_limit,
             score_ratio=self.context_score_ratio,
+        )
+        context_chunks = (
+            selected_context_chunks
+            if has_sufficient_context(
+                clean_question,
+                selected_context_chunks,
+                intent=intent,
+            )
+            else []
         )
         sources = [_source_from_chunk(chunk) for chunk in context_chunks]
         diagnostic_candidates = [
@@ -272,6 +386,7 @@ class RagAnswerGenerator:
         except OllamaError as exc:
             raise RagAnswerError(str(exc)) from exc
 
+        answer_text = strip_trailing_source_block(answer_text)
         if not answer_text.strip():
             raise RagAnswerError("LLM returned an empty answer.")
 
@@ -290,10 +405,39 @@ class RagAnswerGenerator:
             diagnostic_candidates=diagnostic_candidates,
         )
 
+    def _retrieve_comparison_candidates(
+        self,
+        question: str,
+        *,
+        candidate_limit: int,
+    ) -> list[RetrievedChunk]:
+        chunks: list[RetrievedChunk] = []
+        for topic_query in _comparison_topic_queries(question):
+            chunks.extend(
+                self.retriever.retrieve(
+                    topic_query,
+                    limit=max(self.context_limit, 3),
+                    candidate_limit=candidate_limit,
+                )
+            )
+        return chunks
+
 
 def detect_query_intent(question: str) -> QueryIntent:
     """Detect a simple transparent query intent without external models."""
     normalized = _normalize_for_match(question)
+
+    if _is_ckp_question(normalized):
+        return _intent("ckp", require_preferred_context=True)
+
+    if _is_kp_commercial_offer_question(normalized):
+        return QueryIntent(name="kp_commercial_offer")
+
+    if _is_ambiguous_kp_question(normalized):
+        return QueryIntent(name="kp_ambiguous")
+
+    if is_comparison_question(normalized):
+        return _intent("comparison")
 
     if _contains_any(
         normalized,
@@ -325,9 +469,6 @@ def detect_query_intent(question: str) -> QueryIntent:
     if "документ" in tokens or "документы" in tokens:
         return _intent("document_flow", require_preferred_context=True)
 
-    if "цкп" in tokens:
-        return _intent("ckp", require_preferred_context=True)
-
     if _contains_any(normalized, ANCHOR_TERMS["отпуск"]):
         return _intent("vacation", anchor_terms=ANCHOR_TERMS["отпуск"])
 
@@ -339,10 +480,7 @@ def detect_query_intent(question: str) -> QueryIntent:
 
 def should_ask_clarification(question: str) -> str | None:
     """Return a clarification answer for ambiguous short abbreviations."""
-    normalized = _normalize_for_match(question)
-    if "цкп" in normalized:
-        return None
-    if _KP_RE.search(normalized):
+    if detect_query_intent(question).name == "kp_ambiguous":
         return CLARIFY_KP_MESSAGE
     return None
 
@@ -363,6 +501,14 @@ def select_context_chunks(
     score_ratio = max(0.0, min(score_ratio, 1.0))
     candidates = list(chunks)
     intent = intent or detect_query_intent(question)
+
+    if intent.name == "comparison":
+        return _select_comparison_context(
+            question,
+            candidates,
+            max_chunks=max_chunks,
+            score_ratio=score_ratio,
+        )
 
     preferred = _chunks_matching_terms(candidates, intent.preferred_terms)
     if preferred:
@@ -397,6 +543,46 @@ def select_context_chunks(
     return candidates[:max_chunks]
 
 
+def has_sufficient_context(
+    question: str,
+    chunks: Sequence[RetrievedChunk],
+    *,
+    intent: QueryIntent | None = None,
+) -> bool:
+    """Return whether selected chunks are safe to expose to the LLM as sources."""
+    if not chunks:
+        return False
+
+    intent = intent or detect_query_intent(question)
+    if intent.name == "comparison":
+        return _has_sufficient_comparison_context(question, chunks)
+
+    if intent.name != "unknown":
+        return True
+
+    significant_terms = _significant_question_terms(question)
+    if not significant_terms:
+        return False
+
+    return any(
+        _chunk_question_evidence_score(chunk, significant_terms) >= 2
+        for chunk in chunks
+    )
+
+
+def is_comparison_question(question: str) -> bool:
+    """Return whether the question compares two meanings or processes."""
+    normalized = _normalize_for_match(question)
+    if _contains_any(normalized, COMPARISON_TRIGGERS):
+        return True
+    return len(_active_topic_groups(normalized)) >= 2
+
+
+def strip_trailing_source_block(answer: str) -> str:
+    """Remove a trailing source list if the LLM ignored the prompt contract."""
+    return _TRAILING_SOURCE_BLOCK_RE.sub("", answer.strip()).rstrip()
+
+
 def _intent(
     name: str,
     *,
@@ -408,6 +594,130 @@ def _intent(
         anchor_terms=anchor_terms or INTENT_ANCHOR_TERMS.get(name, ()),
         preferred_terms=INTENT_PREFERRED_TERMS.get(name, ()),
         require_preferred_context=require_preferred_context,
+    )
+
+
+def _select_comparison_context(
+    question: str,
+    chunks: Sequence[RetrievedChunk],
+    *,
+    max_chunks: int,
+    score_ratio: float,
+) -> list[RetrievedChunk]:
+    topic_groups = _active_topic_groups(question)
+    if not topic_groups:
+        return chunks[:max_chunks]
+
+    selected: list[RetrievedChunk] = []
+    for _, terms in topic_groups:
+        group_chunks = [
+            chunk for chunk in chunks if _chunk_contains_any_term(chunk, terms)
+        ]
+        if not group_chunks:
+            continue
+        selected.append(_best_group_chunk(group_chunks, terms))
+
+    selected = _dedupe_chunks(selected)
+    if len(selected) >= max_chunks:
+        return selected[:max_chunks]
+
+    top_score = max((_chunk_score(chunk) for chunk in chunks), default=0.0)
+    cutoff = top_score * score_ratio if top_score > 0 and score_ratio > 0 else 0.0
+    topic_terms = tuple(term for _, terms in topic_groups for term in terms)
+
+    for chunk in chunks:
+        if chunk in selected:
+            continue
+        if _chunk_score(chunk) < cutoff and not _chunk_contains_any_term(chunk, topic_terms):
+            continue
+        selected.append(chunk)
+        if len(selected) >= max_chunks:
+            break
+
+    return selected
+
+
+def _best_group_chunk(
+    chunks: Sequence[RetrievedChunk],
+    terms: Sequence[str],
+) -> RetrievedChunk:
+    return max(
+        chunks,
+        key=lambda chunk: (
+            _strong_chunk_contains_any_term(chunk, terms),
+            _chunk_score(chunk),
+        ),
+    )
+
+
+def _dedupe_chunks(chunks: Sequence[RetrievedChunk]) -> list[RetrievedChunk]:
+    result: list[RetrievedChunk] = []
+    seen: set[tuple[int | None, str, str | None, int | None]] = set()
+    for chunk in chunks:
+        key = (
+            chunk.chunk_id,
+            chunk.title,
+            chunk.section,
+            chunk.page,
+        )
+        if key in seen:
+            continue
+        result.append(chunk)
+        seen.add(key)
+    return result
+
+
+def _comparison_topic_queries(question: str) -> tuple[str, ...]:
+    query_by_group = {
+        "отпуск": "отпуск оформление отпуск",
+        "задачи": "взять задачу в работу Работа с задачами",
+        "контроль": "контроль распоряжение письменная форма контроль",
+        "зрс": "ЗРС завершенная работа сотрудника",
+        "цкп": "ЦКП ценный конечный продукт",
+        "командировка": "согласование командировки",
+        "договор": "согласование договора документооборот",
+        "распоряжение": "ИП-0005 Распоряжения контроль",
+    }
+    queries = [
+        query_by_group.get(name, " ".join(terms[:3]))
+        for name, terms in _active_topic_groups(question)
+    ]
+    return tuple(dict.fromkeys(query for query in queries if query.strip()))
+
+
+def _is_ambiguous_kp_question(question: str) -> bool:
+    normalized = _normalize_for_match(question)
+    return (
+        _KP_RE.search(normalized) is not None
+        and not _is_kp_commercial_offer_question(normalized)
+        and not _is_ckp_question(normalized)
+    )
+
+
+def _is_kp_commercial_offer_question(question: str) -> bool:
+    normalized = _normalize_for_match(question)
+    return _KP_RE.search(normalized) is not None and _contains_any(
+        normalized,
+        (
+            "коммерческое предложение",
+            "коммерческого предложения",
+            "коммерческому предложению",
+            "коммерческим предложением",
+            "коммерческих предложений",
+        ),
+    )
+
+
+def _is_ckp_question(question: str) -> bool:
+    normalized = _normalize_for_match(question)
+    return "цкп" in normalized or _contains_any(
+        normalized,
+        (
+            "ценный конечный продукт",
+            "ценного конечного продукта",
+            "ценному конечному продукту",
+            "ценным конечным продуктом",
+        ),
     )
 
 
@@ -440,6 +750,33 @@ def _active_anchor_terms(question: str, *, intent: QueryIntent | None = None) ->
     return tuple(dict.fromkeys(terms))
 
 
+def _active_topic_groups(question: str) -> list[tuple[str, tuple[str, ...]]]:
+    normalized_question = _normalize_for_match(question)
+    groups: list[tuple[str, tuple[str, ...]]] = []
+
+    for name, variants in ANCHOR_TERMS.items():
+        if any(variant in normalized_question for variant in variants):
+            groups.append((name, variants))
+
+    return groups
+
+
+def _has_sufficient_comparison_context(
+    question: str,
+    chunks: Sequence[RetrievedChunk],
+) -> bool:
+    topic_groups = _active_topic_groups(question)
+    if len(topic_groups) < 2:
+        return bool(chunks)
+
+    covered_groups = {
+        name
+        for name, terms in topic_groups
+        if any(_chunk_contains_any_term(chunk, terms) for chunk in chunks)
+    }
+    return len(covered_groups) >= 2
+
+
 def _chunk_contains_any_term(chunk: RetrievedChunk, terms: Sequence[str]) -> bool:
     metadata = chunk.metadata or {}
     haystack = _normalize_for_match(
@@ -454,6 +791,25 @@ def _chunk_contains_any_term(chunk: RetrievedChunk, terms: Sequence[str]) -> boo
                 metadata.get("doc_type"),
                 " ".join(str(tag) for tag in metadata.get("tags", [])),
                 chunk.text,
+            )
+        )
+    )
+    return any(term in haystack for term in terms)
+
+
+def _strong_chunk_contains_any_term(chunk: RetrievedChunk, terms: Sequence[str]) -> bool:
+    metadata = chunk.metadata or {}
+    haystack = _normalize_for_match(
+        " ".join(
+            str(value or "")
+            for value in (
+                chunk.title,
+                chunk.source,
+                chunk.section,
+                metadata.get("source_file"),
+                metadata.get("logical_unit_title"),
+                metadata.get("doc_type"),
+                " ".join(str(tag) for tag in metadata.get("tags", [])),
             )
         )
     )
@@ -481,9 +837,7 @@ def _chunks_matching_terms(
 
 
 def _no_answer_message(intent: QueryIntent) -> str:
-    if intent.name == "unknown":
-        return NO_ANSWER_MESSAGE
-    return "В базе знаний Serviceline не найдено достаточно релевантных источников для ответа на этот вопрос."
+    return NO_ANSWER_MESSAGE
 
 
 def _contains_any(value: str, needles: Sequence[str]) -> bool:
@@ -492,6 +846,112 @@ def _contains_any(value: str, needles: Sequence[str]) -> bool:
 
 def _tokens(value: str) -> list[str]:
     return [token.casefold() for token in _TOKEN_RE.findall(value)]
+
+
+def _significant_question_terms(question: str) -> tuple[str, ...]:
+    terms = []
+    for token in _tokens(_normalize_for_match(question)):
+        if token in _GENERIC_CONTEXT_STOP_WORDS:
+            continue
+        if len(token) < 4 and not any(char.isdigit() for char in token):
+            continue
+        terms.append(token)
+    return tuple(dict.fromkeys(terms))
+
+
+def _chunk_question_evidence_score(
+    chunk: RetrievedChunk,
+    terms: Sequence[str],
+) -> int:
+    metadata = chunk.metadata or {}
+    strong_haystack = _normalize_for_match(
+        " ".join(
+            str(value or "")
+            for value in (
+                chunk.title,
+                chunk.source,
+                chunk.section,
+                metadata.get("source_file"),
+                metadata.get("logical_unit_title"),
+                metadata.get("doc_type"),
+                " ".join(str(tag) for tag in metadata.get("tags", [])),
+            )
+        )
+    )
+    weak_haystack = _normalize_for_match(
+        " ".join(
+            str(value or "")
+            for value in (
+                chunk.matched_excerpt,
+                chunk.text,
+            )
+        )
+    )
+
+    score = 0
+    for term in terms:
+        if _term_matches_haystack(term, strong_haystack):
+            score += 2
+        elif _term_matches_haystack(term, weak_haystack):
+            score += 1
+    return score
+
+
+def _term_matches_haystack(term: str, haystack: str) -> bool:
+    if term in haystack:
+        return True
+
+    if len(term) <= 5:
+        return False
+
+    prefix = _term_prefix(term)
+    return len(prefix) >= 5 and prefix in haystack
+
+
+def _term_prefix(term: str) -> str:
+    for suffix in (
+        "иями",
+        "ями",
+        "ами",
+        "ого",
+        "ему",
+        "ому",
+        "ыми",
+        "ими",
+        "ий",
+        "ый",
+        "ой",
+        "ая",
+        "яя",
+        "ое",
+        "ее",
+        "ии",
+        "ия",
+        "ие",
+        "ых",
+        "их",
+        "ую",
+        "юю",
+        "ам",
+        "ям",
+        "ах",
+        "ях",
+        "ов",
+        "ев",
+        "ей",
+        "ом",
+        "ем",
+        "а",
+        "я",
+        "ы",
+        "и",
+        "е",
+        "у",
+        "ю",
+    ):
+        if term.endswith(suffix) and len(term) - len(suffix) >= 5:
+            return term[: -len(suffix)]
+    return term
 
 
 def _normalize_for_match(value: str) -> str:

@@ -81,8 +81,10 @@ def _render_result_details(result) -> None:
             )
             if source.matched_excerpt:
                 st.caption(source.matched_excerpt)
-    else:
+    elif result.response_kind == "no_answer":
         st.info("Релевантные источники ответа не найдены.")
+    else:
+        st.info("Источники ответа не использовались.")
 
     with st.expander("Диагностика"):
         st.write(f"Модель: {result.model}")

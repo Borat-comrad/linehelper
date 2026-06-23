@@ -41,11 +41,17 @@ def test_query_normalization_handles_russian_punctuation() -> None:
 def test_domain_expansions_for_zrs_ckp_and_planning() -> None:
     zrs = expand_query_terms("Из чего состоит ЗРС?")
     ckp = expand_query_terms("Что такое ЦКП?")
+    ckp_phrase = expand_query_terms("ЦКП как ценный конечный продукт компании")
     planning = expand_query_terms("Что говорится про планирование на неделю?")
+    task = expand_query_terms("Взять задачу в работу — это то же самое, что взять отпуск?")
+    control = expand_query_terms("Мне нужно взять под контроль процесс, это отпуск?")
 
     assert "завершенная работа сотрудника" in zrs
     assert "ценный конечный продукт" in ckp
+    assert "ИП 0003 ЦКП SERVICELINE" in ckp_phrase
     assert "планирование на неделю" in planning
+    assert "Работа с задачами" in task
+    assert "ИП 0005 Распоряжения" in control
 
 
 def test_domain_expansions_for_company_and_document_flow() -> None:
@@ -88,3 +94,25 @@ def test_prompt_builder_uses_excerpt_for_long_chunk() -> None:
     assert "Формат контекста: фрагмент из длинного источника." in prompt
     assert "Правила планирования на неделю" in prompt
     assert chunk.text not in prompt
+
+
+def test_prompt_builder_keeps_sources_in_context_but_not_in_answer_contract() -> None:
+    chunk = RetrievedChunk(
+        chunk_id=1,
+        title="Тестовый документ",
+        source="data/raw_docs/test.pdf",
+        section="Тестовый раздел",
+        page=1,
+        text="Тестовый текст.",
+        score=-1.0,
+        metadata={},
+        matched_terms=["тест"],
+        matched_excerpt="Тестовый текст.",
+    )
+
+    prompt = build_rag_prompt("Что такое тест?", [chunk])
+
+    assert "Источники:" in prompt
+    assert "В конце ответа дай список источников" not in prompt
+    assert "В конце укажи источники" not in prompt
+    assert "UI покажет источники отдельно" in prompt
