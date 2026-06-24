@@ -244,6 +244,18 @@ def fallback_query_plan(question: str) -> QueryPlan:
             notes="Fallback: ЦКП зафиксирован как ценный конечный продукт.",
         )
 
+    if _is_company_identity_question(normalized):
+        return _simple_plan(
+            clean_question,
+            intent="company_identity",
+            answer_type="definition",
+            query_expansions=["цели компании", "замыслы компании", "ЦКП Serviceline"],
+            preferred_sources=[
+                "ИП-0002 Цели и замыслы компании Serviceline",
+                "ИП-0003 ЦКП SERVICELINE",
+            ],
+        )
+
     if _is_kp_commercial_offer_question(normalized):
         return QueryPlan(
             intent="kp_commercial_offer",
@@ -292,7 +304,9 @@ def fallback_query_plan(question: str) -> QueryPlan:
             "организационная структура",
             "структура компании",
             "из чего состоит компания",
+            "что входит в структуру компании",
             "устроена компания",
+            "службы",
         ),
     ):
         return QueryPlan(
@@ -334,7 +348,7 @@ def fallback_query_plan(question: str) -> QueryPlan:
             query_expansions=["оформить отпуск", "отпуск в документообороте"],
         )
 
-    if "зрс" in normalized:
+    if "зрс" in normalized or "ситуация данные решение" in normalized:
         if _contains_any(normalized, ("соглас", "утверд", "одобр", "подпис")):
             return _simple_plan(
                 clean_question,
@@ -359,41 +373,16 @@ def fallback_query_plan(question: str) -> QueryPlan:
             query_expansions=["согласование договора", "договор в документообороте"],
         )
 
-    if _contains_any(normalized, ("командиров", "служебная поездка")):
-        return _simple_plan(
-            clean_question,
-            intent="business_trip",
-            answer_type="procedure",
-            query_expansions=["согласование командировки", "оформить командировку"],
-        )
-
-    if _contains_any(normalized, ("распоряжение", "распоряжения")):
-        return _simple_plan(
-            clean_question,
-            intent="order_disposition",
-            answer_type="procedure",
-            query_expansions=["распоряжения", "ИП-0005 Распоряжения"],
-        )
-
-    if _contains_any(
-        normalized,
-        ("задача", "задачу", "задачи", "взять задачу", "направить задачу"),
-    ):
-        return _simple_plan(
-            clean_question,
-            intent="task_management",
-            answer_type="procedure",
-            query_expansions=["работа с задачами", "взять задачу в работу"],
-        )
-
     if _contains_any(
         normalized,
         (
             "потерял документ",
+            "потерял оригинал документа",
             "потеряла документ",
             "потерян документ",
             "утерян документ",
             "пропал документ",
+            "не могу найти документ",
         ),
     ):
         return QueryPlan(
@@ -410,35 +399,120 @@ def fallback_query_plan(question: str) -> QueryPlan:
 
     if _contains_any(
         normalized,
-        ("ноутбук", "оборудование", "доступ", "it-заяв", "it заяв", "айти"),
+        (
+            "задача",
+            "задачу",
+            "задачи",
+            "задачей",
+            "взять задачу",
+            "направить задачу",
+            "поставить задачу",
+        ),
+    ):
+        return _simple_plan(
+            clean_question,
+            intent="task_management",
+            answer_type="procedure",
+            query_expansions=["работа с задачами", "взять задачу в работу"],
+        )
+
+    if _contains_any(
+        normalized,
+        (
+            "документооборот",
+            "1с до",
+            "1с документооборот",
+            "создать документ",
+            "согласовать документ",
+        ),
+    ):
+        return _simple_plan(
+            clean_question,
+            intent="document_flow",
+            answer_type="procedure",
+            query_expansions=["документооборот", "1С ДО", "согласование документов"],
+            preferred_sources=["ИП-0006 Документооборот"],
+        )
+
+    if _contains_any(normalized, ("командиров", "служебная поездка")):
+        return _simple_plan(
+            clean_question,
+            intent="business_trip",
+            answer_type="procedure",
+            query_expansions=["согласование командировки", "оформить командировку"],
+        )
+
+    if _contains_any(normalized, ("распоряжение", "распоряжения", "распоряжении")):
+        return _simple_plan(
+            clean_question,
+            intent="order_disposition",
+            answer_type="procedure",
+            query_expansions=["распоряжения", "ИП-0005 Распоряжения"],
+        )
+
+    if _contains_any(
+        normalized,
+        (
+            "задача",
+            "задачу",
+            "задачи",
+            "задачей",
+            "взять задачу",
+            "направить задачу",
+            "поставить задачу",
+        ),
+    ):
+        return _simple_plan(
+            clean_question,
+            intent="task_management",
+            answer_type="procedure",
+            query_expansions=["работа с задачами", "взять задачу в работу"],
+        )
+
+    if _contains_any(
+        normalized,
+        (
+            "потерял документ",
+            "потерял оригинал документа",
+            "потеряла документ",
+            "потерян документ",
+            "утерян документ",
+            "пропал документ",
+            "не могу найти документ",
+        ),
+    ):
+        return QueryPlan(
+            intent="document_loss",
+            normalized_question="Что делать, если потерян документ?",
+            query_expansions=["потерян документ", "утерян документ", "документ потеряли"],
+            preferred_sources=[],
+            answer_type="partial_answer",
+            needs_clarification=False,
+            clarification_question=None,
+            confidence=0.7,
+            notes="Fallback: вопрос про потерю документа.",
+        )
+
+    if _contains_any(
+        normalized,
+        (
+            "ноутбук",
+            "оборудование",
+            "доступ",
+            "it-заяв",
+            "it заяв",
+            "айти",
+            "компьютер",
+            "программа",
+            "программу",
+            "пароль",
+        ),
     ):
         return _simple_plan(
             clean_question,
             intent="equipment_it_request",
             answer_type="general",
             query_expansions=["получить ноутбук", "заявка на оборудование", "IT-заявка"],
-        )
-
-    if _contains_any(
-        normalized,
-        (
-            "чем занимается компания",
-            "что делает компания",
-            "о компании",
-            "цель компании",
-            "serviceline",
-            "сервислайн",
-        ),
-    ):
-        return _simple_plan(
-            clean_question,
-            intent="company_identity",
-            answer_type="definition",
-            query_expansions=["цели компании", "замыслы компании", "ЦКП Serviceline"],
-            preferred_sources=[
-                "ИП-0002 Цели и замыслы компании Serviceline",
-                "ИП-0003 ЦКП SERVICELINE",
-            ],
         )
 
     if _is_obvious_off_topic(normalized):
@@ -693,6 +767,8 @@ def _is_ckp_question(question: str) -> bool:
             "ценного конечного продукта",
             "ценному конечному продукту",
             "ценным конечным продуктом",
+            "главный продукт компании",
+            "главный продукт serviceline",
         ),
     )
 
@@ -704,8 +780,13 @@ def _is_company_identity_question(question: str) -> bool:
             "чем занимается компания",
             "что делает компания",
             "какая цель компании",
+            "какая основная цель компании",
             "цель компании",
+            "какой бизнес у serviceline",
+            "смысл деятельности компании",
+            "для чего существует компания",
             "о компании",
+            "расскажи кратко о компании",
             "что такое serviceline",
             "что такое сервислайн",
         ),
@@ -718,6 +799,13 @@ def _is_kp_commercial_offer_question(question: str) -> bool:
         and _contains_any(
             question,
             (
+                "кп как",
+                "составить кп",
+                "подготовить кп",
+                "сделать кп",
+                "сформируй кп",
+                "кп клиенту",
+                "кп по заявке",
                 "коммерческого предложения",
                 "коммерческому предложению",
                 "коммерческим предложением",
@@ -743,7 +831,11 @@ def _is_obvious_off_topic(question: str) -> bool:
             "рецепт",
             "борщ",
             "погода",
+            "курс доллара",
+            "выиграл вчера матч",
             "утят",
+            "кот",
+            "стих",
             "котлет",
             "фильм",
             "музыка",

@@ -9,7 +9,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from linehelper.rag.query_analyzer import QueryAnalyzer  # noqa: E402
+from linehelper.rag.query_analyzer import KNOWN_SOURCE_TITLES, QueryAnalyzer  # noqa: E402
 
 
 QUESTIONS = [
@@ -118,6 +118,11 @@ def _validate_expectation(question: str, plan) -> list[str]:
         return []
 
     errors = []
+    unknown_sources = [
+        source for source in plan.preferred_sources if source not in KNOWN_SOURCE_TITLES
+    ]
+    if unknown_sources:
+        errors.append(f"{question!r}: unknown preferred_sources {unknown_sources!r}")
     if expected.get("intent") and plan.intent != expected["intent"]:
         errors.append(
             f"{question!r}: intent {plan.intent!r}, expected {expected['intent']!r}"

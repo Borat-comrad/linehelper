@@ -217,6 +217,311 @@ def test_unknown_schema_values_are_normalized() -> None:
     assert plan.confidence == 1.0
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        "какие отделы есть в компании?",
+        "из каких подразделений состоит компания?",
+        "какие отделения есть в компании?",
+        "как устроена компания?",
+        "из чего состоит структура компании?",
+        "какая организационная структура компании?",
+        "что входит в структуру компании?",
+        "перечисли подразделения компании",
+        "какие есть службы и отделы?",
+    ],
+)
+def test_strict_org_structure_questions(question: str) -> None:
+    plan = _fallback_plan(question)
+
+    assert plan.intent == "org_structure"
+    assert plan.answer_type == "list"
+    assert "2026-03-03_Оргсхема _ Компании" in plan.preferred_sources
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "чем занимается компания?",
+        "что делает компания?",
+        "какая основная цель компании?",
+        "какой бизнес у Serviceline?",
+        "в чем смысл деятельности компании?",
+        "для чего существует компания?",
+        "что такое Serviceline?",
+        "расскажи кратко о компании",
+    ],
+)
+def test_strict_company_identity_questions(question: str) -> None:
+    plan = _fallback_plan(question)
+
+    assert plan.intent == "company_identity"
+    assert plan.intent != "org_structure"
+    assert plan.answer_type in {"definition", "general"}
+    assert {
+        "ИП-0002 Цели и замыслы компании Serviceline",
+        "ИП-0003 ЦКП SERVICELINE",
+    }.intersection(plan.preferred_sources)
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "что такое цкп?",
+        "какой цкп компании?",
+        "что значит ценный конечный продукт?",
+        "а при чем тут ценный конечный продукт?",
+        "почему ЦКП важен?",
+        "какой главный продукт компании?",
+    ],
+)
+def test_strict_company_ckp_questions(question: str) -> None:
+    plan = _fallback_plan(question)
+
+    assert plan.intent == "company_ckp"
+    assert plan.answer_type in {"definition", "general"}
+    assert "ИП-0003 ЦКП SERVICELINE" in plan.preferred_sources
+    assert "центр комплексных предложений" not in json.dumps(
+        plan.to_dict(),
+        ensure_ascii=False,
+    ).casefold()
+
+
+@pytest.mark.parametrize("question", ["что такое кп?", "кп", "что значит КП?"])
+def test_strict_ambiguous_kp_questions(question: str) -> None:
+    plan = _fallback_plan(question)
+
+    assert plan.intent == "ambiguous_abbreviation"
+    assert plan.answer_type == "clarification"
+    assert plan.needs_clarification is True
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "коммерческое предложение",
+        "КП как коммерческое предложение",
+        "как составить коммерческое предложение?",
+        "подготовить КП клиенту",
+    ],
+)
+def test_strict_commercial_offer_questions(question: str) -> None:
+    plan = _fallback_plan(question)
+
+    assert plan.intent == "kp_commercial_offer"
+    assert plan.answer_type in {"partial_answer", "general", "procedure"}
+    assert all(source in _KNOWN_TEST_SOURCES for source in plan.preferred_sources)
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "как работает документооборот?",
+        "какие правила документооборота действуют?",
+        "как создать документ в 1С ДО?",
+        "что такое 1С документооборот?",
+        "как согласовать документ?",
+    ],
+)
+def test_strict_document_flow_questions(question: str) -> None:
+    plan = _fallback_plan(question)
+
+    assert plan.intent == "document_flow"
+    assert "ИП-0006 Документооборот" in plan.preferred_sources
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "как согласовать договор?",
+        "как завести договор в документообороте?",
+        "что делать с договором?",
+        "договор нужно провести через 1С ДО?",
+        "кто согласует договор?",
+    ],
+)
+def test_strict_contract_questions(question: str) -> None:
+    plan = _fallback_plan(question)
+
+    assert plan.intent == "contract_approval"
+    assert plan.answer_type in {"procedure", "general"}
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "хочу взять отпуск",
+        "как оформить отпуск?",
+        "мне нужно перенести отпуск",
+        "заявление на отпуск",
+        "где оформить отпуск в документообороте?",
+    ],
+)
+def test_strict_vacation_questions(question: str) -> None:
+    plan = _fallback_plan(question)
+
+    assert plan.intent == "vacation"
+    assert plan.answer_type == "procedure"
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "как согласовать командировку?",
+        "как оформить командировку?",
+        "мне нужно ехать в командировку",
+        "служебное задание на командировку",
+        "приказ о командировке",
+    ],
+)
+def test_strict_business_trip_questions(question: str) -> None:
+    plan = _fallback_plan(question)
+
+    assert plan.intent == "business_trip"
+    assert plan.answer_type in {"procedure", "general"}
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "что значит взять задачу в работу?",
+        "как взять задачу в работу?",
+        "как направить задачу подчиненному?",
+        "как поставить задачу в 1С ДО?",
+        "что делать с новой задачей?",
+    ],
+)
+def test_strict_task_questions(question: str) -> None:
+    plan = _fallback_plan(question)
+
+    assert plan.intent == "task_management"
+    assert plan.answer_type in {"definition", "procedure", "general"}
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "как оформить распоряжение?",
+        "что должно быть в распоряжении?",
+        "как дать распоряжение сотруднику?",
+        "как контролировать распоряжение?",
+        "распоряжение нужно писать письменно?",
+    ],
+)
+def test_strict_order_disposition_questions(question: str) -> None:
+    plan = _fallback_plan(question)
+
+    assert plan.intent == "order_disposition"
+    assert plan.answer_type in {"procedure", "general"}
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "что такое ЗРС?",
+        "из чего состоит ЗРС?",
+        "зачем нужна ЗРС?",
+        "структура ЗРС",
+        "ситуация данные решение",
+    ],
+)
+def test_strict_zrs_definition_questions(question: str) -> None:
+    plan = _fallback_plan(question)
+
+    assert plan.intent == "zrs_definition"
+    assert "ИП-0004 Структура ЗРС" in plan.preferred_sources
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "как согласовать ЗРС?",
+        "как оформить ЗРС в документообороте?",
+        "создать ЗРС в 1С ДО",
+    ],
+)
+def test_strict_zrs_approval_questions(question: str) -> None:
+    plan = _fallback_plan(question)
+
+    assert plan.intent in {"zrs_approval", "zrs_definition"}
+    assert plan.intent != "off_topic"
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "я потерял документ что делать",
+        "потерял оригинал документа",
+        "не могу найти документ",
+        "пропал документ в 1С ДО",
+    ],
+)
+def test_strict_document_loss_questions(question: str) -> None:
+    plan = _fallback_plan(question)
+
+    assert plan.intent == "document_loss"
+    assert plan.answer_type in {"partial_answer", "no_answer", "general"}
+    assert plan.answer_type != "procedure"
+    assert plan.preferred_sources == []
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "как получить новый ноутбук?",
+        "мне нужен рабочий ноутбук",
+        "сломался компьютер",
+        "как запросить доступ?",
+        "как установить программу?",
+    ],
+)
+def test_strict_equipment_it_questions(question: str) -> None:
+    plan = _fallback_plan(question)
+
+    assert plan.intent == "equipment_it_request"
+    assert plan.answer_type in {"partial_answer", "no_answer", "general"}
+    assert plan.answer_type != "procedure"
+    assert all(source in _KNOWN_TEST_SOURCES for source in plan.preferred_sources)
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "как приготовить борщ?",
+        "какая погода завтра?",
+        "сколько маленьких утят после бега есть хотят?",
+        "напиши стих про кота",
+        "какой курс доллара?",
+        "кто выиграл вчера матч?",
+    ],
+)
+def test_strict_off_topic_questions(question: str) -> None:
+    plan = _fallback_plan(question)
+
+    assert plan.intent in {"off_topic", "unknown"}
+    assert plan.answer_type == "no_answer"
+    assert plan.preferred_sources == []
+
+
+_KNOWN_TEST_SOURCES = {
+    "2026-03-03_Оргсхема _ Компании",
+    "ИП-0002 Цели и замыслы компании Serviceline",
+    "ИП-0003 ЦКП SERVICELINE",
+    "ИП-0004 Структура ЗРС",
+    "ИП-0005 Распоряжения",
+    "ИП-0006 Документооборот",
+    "Инструкция Согласования договоров в Документообороте",
+    "Инструкция Согласования командировки в Документообороте",
+    "Инструкция Согласования ЗРС в Документообороте",
+    "Регламент по письменной коммуникации",
+    "Регламент по планированию на неделю",
+}
+
+
+def _fallback_plan(question: str):
+    return QueryAnalyzer(ollama_client=FakeOllamaClient("not json")).analyze(question)
+
+
 class FakeOllamaClient:
     model = "fake-model"
 
