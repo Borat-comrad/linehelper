@@ -46,6 +46,81 @@ def test_markdown_json_block_is_parsed() -> None:
     assert plan.answer_type == "list"
 
 
+def test_company_activity_overrides_wrong_org_structure_intent() -> None:
+    client = FakeOllamaClient(json.dumps(ORG_STRUCTURE_RESPONSE, ensure_ascii=False))
+    analyzer = QueryAnalyzer(ollama_client=client)
+
+    plan = analyzer.analyze("чем занимается компания?")
+
+    assert plan.intent == "company_identity"
+    assert plan.answer_type == "definition"
+    assert "ИП-0002 Цели и замыслы компании Serviceline" in plan.preferred_sources
+
+
+def test_preferred_sources_outside_allowlist_are_removed() -> None:
+    response = {
+        **ORG_STRUCTURE_RESPONSE,
+        "preferred_sources": [
+            "2026-03-03_Оргсхема _ Компании",
+            "2026-03-03_ИТ_Заявки на приобретение ноутбука",
+            "invented source",
+        ],
+    }
+    analyzer = QueryAnalyzer(
+        ollama_client=FakeOllamaClient(json.dumps(response, ensure_ascii=False))
+    )
+
+    plan = analyzer.analyze("какие отделы есть в компании?")
+
+    assert plan.preferred_sources == ["2026-03-03_Оргсхема _ Компании"]
+
+
+def test_document_loss_procedure_is_downgraded() -> None:
+    response = {
+        "intent": "document_loss",
+        "normalized_question": "Что делать, если потерян документ?",
+        "query_expansions": ["потерян документ"],
+        "preferred_sources": ["invented document-loss source"],
+        "answer_type": "procedure",
+        "needs_clarification": False,
+        "clarification_question": None,
+        "confidence": 0.9,
+        "notes": "Модель ошибочно выбрала procedure.",
+    }
+    analyzer = QueryAnalyzer(
+        ollama_client=FakeOllamaClient(json.dumps(response, ensure_ascii=False))
+    )
+
+    plan = analyzer.analyze("я потерял документ что делать")
+
+    assert plan.intent == "document_loss"
+    assert plan.answer_type == "partial_answer"
+    assert plan.preferred_sources == []
+
+
+def test_equipment_request_removes_procedure_and_fake_it_source() -> None:
+    response = {
+        "intent": "equipment_it_request",
+        "normalized_question": "Как получить новый ноутбук?",
+        "query_expansions": ["получить ноутбук", "IT-заявка"],
+        "preferred_sources": ["2026-03-03_ИТ_Заявки на приобретение ноутбука"],
+        "answer_type": "procedure",
+        "needs_clarification": False,
+        "clarification_question": None,
+        "confidence": 0.95,
+        "notes": "Модель выдумала IT-source.",
+    }
+    analyzer = QueryAnalyzer(
+        ollama_client=FakeOllamaClient(json.dumps(response, ensure_ascii=False))
+    )
+
+    plan = analyzer.analyze("как получить новый ноутбук?")
+
+    assert plan.intent == "equipment_it_request"
+    assert plan.answer_type == "general"
+    assert plan.preferred_sources == []
+
+
 def test_invalid_json_falls_back_without_exception() -> None:
     analyzer = QueryAnalyzer(ollama_client=FakeOllamaClient("not json"))
 

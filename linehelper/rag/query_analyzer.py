@@ -54,6 +54,22 @@ ALLOWED_ANSWER_TYPES = frozenset(
     }
 )
 
+KNOWN_SOURCE_TITLES = frozenset(
+    {
+        "2026-03-03_Оргсхема _ Компании",
+        "ИП-0002 Цели и замыслы компании Serviceline",
+        "ИП-0003 ЦКП SERVICELINE",
+        "ИП-0004 Структура ЗРС",
+        "ИП-0005 Распоряжения",
+        "ИП-0006 Документооборот",
+        "Инструкция Согласования договоров в Документообороте",
+        "Инструкция Согласования командировки в Документообороте",
+        "Инструкция Согласования ЗРС в Документообороте",
+        "Регламент по письменной коммуникации",
+        "Регламент по планированию на неделю",
+    }
+)
+
 _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.IGNORECASE | re.DOTALL)
 _KP_RE = re.compile(r"(?<![0-9a-zа-яё])кп(?![0-9a-zа-яё])", re.IGNORECASE)
 _FORBIDDEN_CKP_MEANING_RE = re.compile(
@@ -145,6 +161,8 @@ def build_query_analyzer_prompt(question: str) -> list[dict[str, str]]:
 - Не добавляй пояснения до или после JSON.
 - Не отвечай на вопрос пользователя.
 - Не выдумывай источники; preferred_sources заполняй только если источник очевиден из корпоративной карты.
+- preferred_sources может содержать только эти known source titles: {", ".join(sorted(KNOWN_SOURCE_TITLES))}.
+- Если подходящего source title нет в списке known source titles, верни preferred_sources=[].
 - Верни ровно один JSON-объект.
 - intent должен быть одним из: {", ".join(sorted(ALLOWED_INTENTS))}.
 - answer_type должен быть одним из: {", ".join(sorted(ALLOWED_ANSWER_TYPES))}.
@@ -166,6 +184,9 @@ def build_query_analyzer_prompt(question: str) -> list[dict[str, str]]:
 - Вопросы про задачи, взять задачу в работу, направить задачу относятся к task_management.
 - Вопросы про потерю документа относятся к document_loss.
 - Вопросы про ноутбук, оборудование, доступ, IT-заявку относятся к equipment_it_request.
+- Вопросы "чем занимается компания?", "что делает компания?", "какая цель компании?" относятся к company_identity, а не к org_structure.
+- Для document_loss не используй answer_type="procedure"; используй "partial_answer" или "no_answer".
+- Для equipment_it_request не используй answer_type="procedure"; если нет известного источника, preferred_sources должен быть пустым.
 
 JSON schema:
 {{
@@ -394,7 +415,7 @@ def fallback_query_plan(question: str) -> QueryPlan:
         return _simple_plan(
             clean_question,
             intent="equipment_it_request",
-            answer_type="procedure",
+            answer_type="general",
             query_expansions=["получить ноутбук", "заявка на оборудование", "IT-заявка"],
         )
 
@@ -497,8 +518,40 @@ def _sanitize_plan(plan: QueryPlan, question: str) -> QueryPlan:
     if _is_kp_commercial_offer_question(normalized_question):
         return fallback_query_plan(question)
 
-    if plan.intent != "company_ckp" and not _is_ckp_question(normalized_question):
-        return plan
+    if _is_company_identity_question(normalized_question):
+        return _with_known_sources(fallback_query_plan(question))
+
+    if plan.intent == "company_ckp" or _is_ckp_question(normalized_question):
+        return _sanitize_ckp_plan(plan)
+
+    answer_type = plan.answer_type
+    preferred_sources = _filter_known_sources(plan.preferred_sources)
+
+    if plan.intent == "document_loss":
+        if answer_type == "procedure":
+            answer_type = "partial_answer"
+        preferred_sources = []
+
+    if plan.intent == "equipment_it_request":
+        if answer_type == "procedure":
+            answer_type = "general"
+        preferred_sources = []
+
+    return QueryPlan(
+        intent=plan.intent,
+        normalized_question=plan.normalized_question,
+        query_expansions=plan.query_expansions,
+        preferred_sources=preferred_sources,
+        answer_type=answer_type,
+        needs_clarification=plan.needs_clarification,
+        clarification_question=plan.clarification_question,
+        confidence=plan.confidence,
+        notes=plan.notes,
+    )
+
+
+def _sanitize_ckp_plan(plan: QueryPlan) -> QueryPlan:
+    """Force the corporate meaning of CKP and its known source title."""
 
     query_expansions = [
         _FORBIDDEN_CKP_MEANING_RE.sub("ценный конечный продукт", value)
@@ -527,6 +580,24 @@ def _sanitize_plan(plan: QueryPlan, question: str) -> QueryPlan:
             else plan.notes
         ),
     )
+
+
+def _with_known_sources(plan: QueryPlan) -> QueryPlan:
+    return QueryPlan(
+        intent=plan.intent,
+        normalized_question=plan.normalized_question,
+        query_expansions=plan.query_expansions,
+        preferred_sources=_filter_known_sources(plan.preferred_sources),
+        answer_type=plan.answer_type,
+        needs_clarification=plan.needs_clarification,
+        clarification_question=plan.clarification_question,
+        confidence=plan.confidence,
+        notes=plan.notes,
+    )
+
+
+def _filter_known_sources(sources: list[str]) -> list[str]:
+    return [source for source in sources if source in KNOWN_SOURCE_TITLES]
 
 
 def _loads_json_object(content: str) -> dict[str, Any]:
@@ -622,6 +693,21 @@ def _is_ckp_question(question: str) -> bool:
             "ценного конечного продукта",
             "ценному конечному продукту",
             "ценным конечным продуктом",
+        ),
+    )
+
+
+def _is_company_identity_question(question: str) -> bool:
+    return _contains_any(
+        question,
+        (
+            "чем занимается компания",
+            "что делает компания",
+            "какая цель компании",
+            "цель компании",
+            "о компании",
+            "что такое serviceline",
+            "что такое сервислайн",
         ),
     )
 

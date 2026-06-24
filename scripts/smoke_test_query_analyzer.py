@@ -30,12 +30,33 @@ QUESTIONS = [
     "сколько маленьких утят после бега есть хотят?",
 ]
 
+EXPECTED_PLANS = {
+    "чем занимается компания?": {
+        "intent": "company_identity",
+    },
+    "что такое кп?": {
+        "intent": "ambiguous_abbreviation",
+        "answer_type": "clarification",
+    },
+    "я потерял документ что делать": {
+        "intent": "document_loss",
+        "forbidden_answer_types": {"procedure"},
+        "preferred_sources": [],
+    },
+    "как получить новый ноутбук?": {
+        "intent": "equipment_it_request",
+        "forbidden_answer_types": {"procedure"},
+        "preferred_sources": [],
+    },
+}
+
 
 def main() -> int:
     _configure_stdout()
 
     analyzer = QueryAnalyzer()
     fallback_notice_printed = False
+    errors: list[str] = []
 
     print("=== QUERY ANALYZER SMOKE TEST ===")
     print(f"Model: {analyzer.model}")
@@ -77,10 +98,44 @@ def main() -> int:
                 ]
             )
         )
+        errors.extend(_validate_expectation(question, plan))
 
     print()
+    if errors:
+        print("Expectation errors:")
+        for error in errors:
+            print(f"- {error}")
+        print("Status: FAIL")
+        return 1
+
     print("Status: PASS")
     return 0
+
+
+def _validate_expectation(question: str, plan) -> list[str]:
+    expected = EXPECTED_PLANS.get(question)
+    if expected is None:
+        return []
+
+    errors = []
+    if expected.get("intent") and plan.intent != expected["intent"]:
+        errors.append(
+            f"{question!r}: intent {plan.intent!r}, expected {expected['intent']!r}"
+        )
+    if expected.get("answer_type") and plan.answer_type != expected["answer_type"]:
+        errors.append(
+            f"{question!r}: answer_type {plan.answer_type!r}, "
+            f"expected {expected['answer_type']!r}"
+        )
+    forbidden_answer_types = expected.get("forbidden_answer_types", set())
+    if plan.answer_type in forbidden_answer_types:
+        errors.append(f"{question!r}: forbidden answer_type {plan.answer_type!r}")
+    if "preferred_sources" in expected and plan.preferred_sources != expected["preferred_sources"]:
+        errors.append(
+            f"{question!r}: preferred_sources {plan.preferred_sources!r}, "
+            f"expected {expected['preferred_sources']!r}"
+        )
+    return errors
 
 
 def _format_row(values: list[str]) -> str:
