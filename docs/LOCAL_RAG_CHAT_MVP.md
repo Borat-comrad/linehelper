@@ -107,6 +107,55 @@ UI разделяет:
 Ограничение: это пока прозрачные эвристические правила, а не полноценный intent
 classifier. Их нужно расширять по мере появления новых ручных failure cases.
 
+## LLM Query Analyzer: experimental stage
+
+Добавлен первый безопасный этап будущей архитектуры: `linehelper/rag/query_analyzer.py`.
+Он использует локальную Ollama/LLM, чтобы преобразовать живой пользовательский вопрос в
+структурированный `QueryPlan` для диагностики, тестов и будущего подключения к retriever.
+
+Важно: Query Analyzer пока не подключен к боевому RAG-ответу. Основной ответ пользователя
+продолжает работать по старой схеме:
+
+`user question -> rule-based routing -> retriever -> no-answer gate -> prompt_builder -> Ollama answer`
+
+`QueryPlan` содержит:
+
+- `intent` - нормализованный смысл вопроса, например `org_structure`, `company_ckp`,
+  `ambiguous_abbreviation`, `document_loss`;
+- `normalized_question` - переформулированный вопрос для поиска;
+- `query_expansions` - расширения запроса и синонимы;
+- `preferred_sources` - очевидные предпочтительные источники, если они известны;
+- `answer_type` - ожидаемый тип ответа;
+- `needs_clarification` и `clarification_question` - флаг и текст уточнения;
+- `confidence` и `notes` - диагностическая уверенность и пояснение.
+
+Будущий целевой пайплайн:
+
+`user question -> Query Analyzer -> QueryPlan -> Retriever -> Evidence Gate -> Answer LLM`
+
+Риски:
+
+- дополнительная задержка на отдельный LLM-вызов;
+- возможный битый JSON от локальной модели;
+- ошибка intent или слишком уверенная нормализация вопроса.
+
+Меры безопасности текущего этапа:
+
+- strict schema с фиксированными `intent` и `answer_type`;
+- rule-based fallback при недоступной Ollama или невалидном JSON;
+- Python validation и нормализация полей;
+- старый pipeline остается неизменным и не зависит от Query Analyzer.
+
+Ручная диагностика:
+
+```powershell
+$env:OLLAMA_ANALYZER_MODEL="qwen2.5:3b"
+.\.venv\Scripts\python.exe scripts\smoke_test_query_analyzer.py
+```
+
+Если локальная Ollama недоступна или вернула битый JSON, smoke-скрипт печатает причину и
+показывает fallback `QueryPlan`, а не падает с непонятной ошибкой.
+
 ## Ollama
 
 Ожидаемые настройки:
