@@ -36,6 +36,8 @@ ALLOWED_INTENTS = frozenset(
         "kp_commercial_offer",
         "ambiguous_abbreviation",
         "document_loss",
+        "attendance_absence",
+        "one_c_operational_lookup",
         "off_topic",
         "unknown",
     }
@@ -69,6 +71,44 @@ KNOWN_SOURCE_TITLES = frozenset(
         "Регламент по планированию на неделю",
     }
 )
+
+INTENT_SOURCE_COMPATIBILITY: dict[str, set[str]] = {
+    "company_identity": {
+        "ИП-0002 Цели и замыслы компании Serviceline",
+        "ИП-0003 ЦКП SERVICELINE",
+    },
+    "company_ckp": {"ИП-0003 ЦКП SERVICELINE"},
+    "org_structure": {"2026-03-03_Оргсхема _ Компании"},
+    "roles_responsibility": {"2026-03-03_Оргсхема _ Компании"},
+    "zrs_definition": {"ИП-0004 Структура ЗРС"},
+    "zrs_approval": {
+        "ИП-0004 Структура ЗРС",
+        "Инструкция Согласования ЗРС в Документообороте",
+    },
+    "vacation": set(),
+    "document_flow": {"ИП-0006 Документооборот"},
+    "contract_approval": {
+        "Инструкция Согласования договоров в Документообороте",
+        "ИП-0006 Документооборот",
+    },
+    "business_trip": {
+        "Инструкция Согласования командировки в Документообороте",
+        "ИП-0006 Документооборот",
+    },
+    "order_disposition": {"ИП-0005 Распоряжения"},
+    "task_management": {"ИП-0005 Распоряжения"},
+    "weekly_planning": {"Регламент по планированию на неделю"},
+    "statistics_kpi": set(),
+    "onboarding_position": set(),
+    "equipment_it_request": set(),
+    "document_loss": set(),
+    "attendance_absence": set(),
+    "one_c_operational_lookup": set(),
+    "kp_commercial_offer": set(),
+    "ambiguous_abbreviation": set(),
+    "off_topic": set(),
+    "unknown": set(),
+}
 
 _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.IGNORECASE | re.DOTALL)
 _KP_RE = re.compile(r"(?<![0-9a-zа-яё])кп(?![0-9a-zа-яё])", re.IGNORECASE)
@@ -162,7 +202,9 @@ def build_query_analyzer_prompt(question: str) -> list[dict[str, str]]:
 - Не отвечай на вопрос пользователя.
 - Не выдумывай источники; preferred_sources заполняй только если источник очевиден из корпоративной карты.
 - preferred_sources может содержать только эти known source titles: {", ".join(sorted(KNOWN_SOURCE_TITLES))}.
+- Источник должен быть не только известным, но и подходящим по intent.
 - Если подходящего source title нет в списке known source titles, верни preferred_sources=[].
+- Если точного подходящего источника нет, лучше вернуть preferred_sources=[], чем выбирать похожий источник.
 - Верни ровно один JSON-объект.
 - intent должен быть одним из: {", ".join(sorted(ALLOWED_INTENTS))}.
 - answer_type должен быть одним из: {", ".join(sorted(ALLOWED_ANSWER_TYPES))}.
@@ -187,6 +229,9 @@ def build_query_analyzer_prompt(question: str) -> list[dict[str, str]]:
 - Вопросы "чем занимается компания?", "что делает компания?", "какая цель компании?" относятся к company_identity, а не к org_structure.
 - Для document_loss не используй answer_type="procedure"; используй "partial_answer" или "no_answer".
 - Для equipment_it_request не используй answer_type="procedure"; если нет известного источника, preferred_sources должен быть пустым.
+- Для attendance_absence, equipment_it_request, document_loss, one_c_operational_lookup и kp_commercial_offer не используй answer_type="procedure", если нет достоверного источника.
+- Операционные 1С-вопросы про цены, остатки, статус заказа, счета, контрагентов, отгрузки и номенклатуру относятся к one_c_operational_lookup. Они пока не относятся к semantic memory и не выполняют поиск в 1С.
+- Вопросы про опоздание, болезнь, отсутствие и невыход на работу относятся к attendance_absence, а не к vacation.
 
 JSON schema:
 {{
@@ -287,6 +332,30 @@ def fallback_query_plan(question: str) -> QueryPlan:
             ),
             confidence=0.8,
             notes="Fallback: аббревиатура КП без уточнения неоднозначна.",
+        )
+
+    if _is_attendance_absence_question(normalized):
+        return _simple_plan(
+            clean_question,
+            intent="attendance_absence",
+            answer_type="partial_answer",
+            query_expansions=[
+                "опоздание на работу",
+                "отсутствие на работе",
+                "болезнь сотрудника",
+            ],
+        )
+
+    if _is_one_c_operational_lookup_question(normalized):
+        return _simple_plan(
+            clean_question,
+            intent="one_c_operational_lookup",
+            answer_type="partial_answer",
+            query_expansions=[
+                "операционный запрос 1С",
+                "статус заказа",
+                "цены остатки счета контрагенты",
+            ],
         )
 
     if _contains_any(
@@ -592,14 +661,20 @@ def _sanitize_plan(plan: QueryPlan, question: str) -> QueryPlan:
     if _is_kp_commercial_offer_question(normalized_question):
         return fallback_query_plan(question)
 
+    if _is_attendance_absence_question(normalized_question):
+        return _with_compatible_sources(fallback_query_plan(question))
+
+    if _is_one_c_operational_lookup_question(normalized_question):
+        return _with_compatible_sources(fallback_query_plan(question))
+
     if _is_company_identity_question(normalized_question):
-        return _with_known_sources(fallback_query_plan(question))
+        return _with_compatible_sources(fallback_query_plan(question))
 
     if plan.intent == "company_ckp" or _is_ckp_question(normalized_question):
         return _sanitize_ckp_plan(plan)
 
     answer_type = plan.answer_type
-    preferred_sources = _filter_known_sources(plan.preferred_sources)
+    preferred_sources = _filter_compatible_sources(plan.preferred_sources, plan.intent)
 
     if plan.intent == "document_loss":
         if answer_type == "procedure":
@@ -610,6 +685,14 @@ def _sanitize_plan(plan: QueryPlan, question: str) -> QueryPlan:
         if answer_type == "procedure":
             answer_type = "general"
         preferred_sources = []
+
+    if plan.intent in {
+        "one_c_operational_lookup",
+        "kp_commercial_offer",
+        "attendance_absence",
+    }:
+        if answer_type == "procedure" and not preferred_sources:
+            answer_type = "partial_answer"
 
     return QueryPlan(
         intent=plan.intent,
@@ -644,7 +727,7 @@ def _sanitize_ckp_plan(plan: QueryPlan) -> QueryPlan:
         ),
         query_expansions=query_expansions,
         preferred_sources=preferred_sources,
-        answer_type=plan.answer_type if plan.answer_type != "general" else "definition",
+        answer_type=plan.answer_type if plan.answer_type in {"definition", "general"} else "definition",
         needs_clarification=False,
         clarification_question=None,
         confidence=plan.confidence,
@@ -656,12 +739,12 @@ def _sanitize_ckp_plan(plan: QueryPlan) -> QueryPlan:
     )
 
 
-def _with_known_sources(plan: QueryPlan) -> QueryPlan:
+def _with_compatible_sources(plan: QueryPlan) -> QueryPlan:
     return QueryPlan(
         intent=plan.intent,
         normalized_question=plan.normalized_question,
         query_expansions=plan.query_expansions,
-        preferred_sources=_filter_known_sources(plan.preferred_sources),
+        preferred_sources=_filter_compatible_sources(plan.preferred_sources, plan.intent),
         answer_type=plan.answer_type,
         needs_clarification=plan.needs_clarification,
         clarification_question=plan.clarification_question,
@@ -670,8 +753,15 @@ def _with_known_sources(plan: QueryPlan) -> QueryPlan:
     )
 
 
-def _filter_known_sources(sources: list[str]) -> list[str]:
-    return [source for source in sources if source in KNOWN_SOURCE_TITLES]
+def _filter_compatible_sources(sources: list[str], intent: str) -> list[str]:
+    known_sources = [source for source in sources if source in KNOWN_SOURCE_TITLES]
+    if intent not in INTENT_SOURCE_COMPATIBILITY:
+        return known_sources
+
+    compatible_sources = INTENT_SOURCE_COMPATIBILITY[intent]
+    if not compatible_sources:
+        return []
+    return [source for source in known_sources if source in compatible_sources]
 
 
 def _loads_json_object(content: str) -> dict[str, Any]:
@@ -789,6 +879,53 @@ def _is_company_identity_question(question: str) -> bool:
             "расскажи кратко о компании",
             "что такое serviceline",
             "что такое сервислайн",
+        ),
+    )
+
+
+def _is_attendance_absence_question(question: str) -> bool:
+    return _contains_any(
+        question,
+        (
+            "опоздал",
+            "опоздание",
+            "заболел",
+            "болею",
+            "не вышел",
+            "не выйду",
+            "отсутствие",
+            "не могу выйти на работу",
+            "пропустил работу",
+            "больничный",
+        ),
+    )
+
+
+def _is_one_c_operational_lookup_question(question: str) -> bool:
+    return _contains_any(
+        question,
+        (
+            "цена",
+            "цену",
+            "стоимость детали",
+            "остатки",
+            "склад",
+            "складе",
+            "статус заказа",
+            "заказ",
+            "счет",
+            "счёт",
+            "счета",
+            "счёта",
+            "контрагент",
+            "контрагента",
+            "отгрузка",
+            "отгрузку",
+            "номенклатура",
+            "найди деталь",
+            "покажи счета",
+            "покажи счёта",
+            "покажи остатки",
         ),
     )
 

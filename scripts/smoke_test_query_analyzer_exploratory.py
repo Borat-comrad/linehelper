@@ -12,7 +12,11 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from linehelper.rag.query_analyzer import KNOWN_SOURCE_TITLES, QueryAnalyzer  # noqa: E402
+from linehelper.rag.query_analyzer import (  # noqa: E402
+    INTENT_SOURCE_COMPATIBILITY,
+    KNOWN_SOURCE_TITLES,
+    QueryAnalyzer,
+)
 
 
 QUESTIONS = [
@@ -65,32 +69,12 @@ QUESTIONS = [
     "покажи счета клиента",
 ]
 
-CRITICAL_FLAGS = {"CKP_BAD_EXPANSION", "OFF_TOPIC_WITH_SOURCE", "UNKNOWN_SOURCE", "CRASH"}
-COMPATIBLE_SOURCES_BY_INTENT = {
-    "company_identity": {
-        "ИП-0002 Цели и замыслы компании Serviceline",
-        "ИП-0003 ЦКП SERVICELINE",
-    },
-    "company_ckp": {"ИП-0003 ЦКП SERVICELINE"},
-    "org_structure": {"2026-03-03_Оргсхема _ Компании"},
-    "roles_responsibility": {"2026-03-03_Оргсхема _ Компании"},
-    "zrs_definition": {"ИП-0004 Структура ЗРС"},
-    "zrs_approval": {
-        "ИП-0004 Структура ЗРС",
-        "Инструкция Согласования ЗРС в Документообороте",
-    },
-    "document_flow": {"ИП-0006 Документооборот"},
-    "contract_approval": {
-        "ИП-0006 Документооборот",
-        "Инструкция Согласования договоров в Документообороте",
-    },
-    "business_trip": {"Инструкция Согласования командировки в Документообороте"},
-    "order_disposition": {"ИП-0005 Распоряжения"},
-    "written_communication": {"Регламент по письменной коммуникации"},
-    "weekly_planning": {"Регламент по планированию на неделю"},
-    "vacation": set(),
-    "statistics_kpi": set(),
-    "onboarding_position": set(),
+CRITICAL_FLAGS = {
+    "CKP_BAD_EXPANSION",
+    "OFF_TOPIC_WITH_SOURCE",
+    "UNKNOWN_SOURCE",
+    "INCOMPATIBLE_SOURCE_FOR_INTENT",
+    "CRASH",
 }
 
 
@@ -196,7 +180,7 @@ def _flags_for_plan(question: str, plan: Any) -> list[str]:
         flags.append("OFF_TOPIC_WITH_SOURCE")
 
     if _has_incompatible_source(plan):
-        flags.append("POSSIBLE_WRONG_INTENT")
+        flags.append("INCOMPATIBLE_SOURCE_FOR_INTENT")
 
     if "центр комплексных предложений" in serialized:
         flags.append("CKP_BAD_EXPANSION")
@@ -257,6 +241,15 @@ def _flags_for_plan(question: str, plan: Any) -> list[str]:
     ):
         flags.append("POSSIBLE_WRONG_INTENT")
 
+    if _is_attendance_question(normalized_question) and plan.intent == "vacation":
+        flags.append("ATTENDANCE_MISROUTED_TO_VACATION")
+
+    if _is_one_c_question(normalized_question) and plan.intent == "document_flow":
+        flags.append("ONE_C_MISROUTED_TO_DOCUMENT_FLOW")
+
+    if _is_one_c_question(normalized_question) and plan.intent == "order_disposition":
+        flags.append("ONE_C_MISROUTED_TO_ORDER_DISPOSITION")
+
     if _looks_like_removed_source_case(normalized_question, plan):
         flags.append("FAKE_SOURCE_REMOVED")
 
@@ -266,7 +259,7 @@ def _flags_for_plan(question: str, plan: Any) -> list[str]:
 def _has_incompatible_source(plan: Any) -> bool:
     if not plan.preferred_sources:
         return False
-    compatible_sources = COMPATIBLE_SOURCES_BY_INTENT.get(plan.intent)
+    compatible_sources = INTENT_SOURCE_COMPATIBILITY.get(plan.intent)
     if compatible_sources is None:
         return False
     return not set(plan.preferred_sources).issubset(compatible_sources)
@@ -280,6 +273,38 @@ def _looks_like_removed_source_case(question: str, plan: Any) -> bool:
     return plan.intent == "kp_commercial_offer" and _contains_any(
         question,
         ("кп", "коммерческое предложение"),
+    )
+
+
+def _is_attendance_question(question: str) -> bool:
+    return _contains_any(
+        question,
+        (
+            "опоздал",
+            "опоздание",
+            "заболел",
+            "не вышел",
+            "не выйду",
+            "отсутствие",
+            "больничный",
+        ),
+    )
+
+
+def _is_one_c_question(question: str) -> bool:
+    return _contains_any(
+        question,
+        (
+            "найди цену",
+            "цена",
+            "остатки",
+            "статус заказа",
+            "контрагент",
+            "счета",
+            "счёта",
+            "отгрузка",
+            "номенклатура",
+        ),
     )
 
 

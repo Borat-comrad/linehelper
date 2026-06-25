@@ -75,6 +75,71 @@ def test_preferred_sources_outside_allowlist_are_removed() -> None:
     assert plan.preferred_sources == ["2026-03-03_Оргсхема _ Компании"]
 
 
+@pytest.mark.parametrize(
+    ("question", "response", "forbidden_source"),
+    [
+        (
+            "отпуск",
+            {
+                "intent": "vacation",
+                "normalized_question": "отпуск",
+                "query_expansions": ["отпуск"],
+                "preferred_sources": ["ИП-0004 Структура ЗРС"],
+                "answer_type": "procedure",
+                "needs_clarification": False,
+                "clarification_question": None,
+                "confidence": 0.9,
+                "notes": "Несовместимый источник.",
+            },
+            "ИП-0004 Структура ЗРС",
+        ),
+        (
+            "статистика",
+            {
+                "intent": "statistics_kpi",
+                "normalized_question": "статистика",
+                "query_expansions": ["статистика"],
+                "preferred_sources": ["ИП-0005 Распоряжения"],
+                "answer_type": "definition",
+                "needs_clarification": False,
+                "clarification_question": None,
+                "confidence": 0.9,
+                "notes": "Несовместимый источник.",
+            },
+            "ИП-0005 Распоряжения",
+        ),
+        (
+            "кто отвечает за закупки?",
+            {
+                "intent": "roles_responsibility",
+                "normalized_question": "кто отвечает за закупки?",
+                "query_expansions": ["ответственность закупок"],
+                "preferred_sources": ["ИП-0004 Структура ЗРС"],
+                "answer_type": "general",
+                "needs_clarification": False,
+                "clarification_question": None,
+                "confidence": 0.9,
+                "notes": "Несовместимый источник.",
+            },
+            "ИП-0004 Структура ЗРС",
+        ),
+    ],
+)
+def test_known_but_incompatible_sources_are_removed(
+    question: str,
+    response: dict,
+    forbidden_source: str,
+) -> None:
+    analyzer = QueryAnalyzer(
+        ollama_client=FakeOllamaClient(json.dumps(response, ensure_ascii=False))
+    )
+
+    plan = analyzer.analyze(question)
+
+    assert forbidden_source not in plan.preferred_sources
+    assert all(source in _KNOWN_TEST_SOURCES for source in plan.preferred_sources)
+
+
 def test_document_loss_procedure_is_downgraded() -> None:
     response = {
         "intent": "document_loss",
@@ -482,6 +547,76 @@ def test_strict_equipment_it_questions(question: str) -> None:
     assert plan.answer_type in {"partial_answer", "no_answer", "general"}
     assert plan.answer_type != "procedure"
     assert all(source in _KNOWN_TEST_SOURCES for source in plan.preferred_sources)
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "я опоздал на работу",
+        "опоздание",
+        "я заболел и не вышел",
+        "не могу выйти на работу",
+        "что делать если заболел",
+    ],
+)
+def test_strict_attendance_absence_questions(question: str) -> None:
+    plan = _fallback_plan(question)
+
+    assert plan.intent == "attendance_absence"
+    assert plan.intent != "vacation"
+    assert plan.preferred_sources == []
+    assert plan.answer_type in {"partial_answer", "no_answer", "general"}
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "какой статус заказа",
+        "найди цену детали",
+        "есть ли остатки на складе",
+        "найди контрагента",
+        "покажи счета клиента",
+        "какая отгрузка по заказу",
+    ],
+)
+def test_strict_one_c_operational_lookup_questions(question: str) -> None:
+    plan = _fallback_plan(question)
+
+    assert plan.intent == "one_c_operational_lookup"
+    assert plan.intent not in {"document_flow", "order_disposition"}
+    assert plan.preferred_sources == []
+    assert plan.answer_type in {"partial_answer", "no_answer", "general"}
+
+
+@pytest.mark.parametrize(
+    "intent",
+    [
+        "document_loss",
+        "equipment_it_request",
+        "one_c_operational_lookup",
+        "kp_commercial_offer",
+        "attendance_absence",
+    ],
+)
+def test_procedure_without_source_is_downgraded_for_unsafe_intents(intent: str) -> None:
+    response = {
+        "intent": intent,
+        "normalized_question": "test",
+        "query_expansions": ["test"],
+        "preferred_sources": [],
+        "answer_type": "procedure",
+        "needs_clarification": False,
+        "clarification_question": None,
+        "confidence": 0.9,
+        "notes": "Procedure without trusted source.",
+    }
+    analyzer = QueryAnalyzer(
+        ollama_client=FakeOllamaClient(json.dumps(response, ensure_ascii=False))
+    )
+
+    plan = analyzer.analyze(f"test {intent}")
+
+    assert plan.answer_type != "procedure"
 
 
 @pytest.mark.parametrize(

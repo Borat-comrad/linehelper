@@ -9,7 +9,11 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from linehelper.rag.query_analyzer import KNOWN_SOURCE_TITLES, QueryAnalyzer  # noqa: E402
+from linehelper.rag.query_analyzer import (  # noqa: E402
+    INTENT_SOURCE_COMPATIBILITY,
+    KNOWN_SOURCE_TITLES,
+    QueryAnalyzer,
+)
 
 
 QUESTIONS = [
@@ -23,10 +27,15 @@ QUESTIONS = [
     "я потерял документ что делать",
     "как получить новый ноутбук?",
     "опоздание",
+    "я опоздал на работу",
+    "я заболел и не вышел",
     "как оформить отпуск?",
     "как согласовать договор?",
     "как согласовать командировку?",
     "что значит взять задачу в работу?",
+    "какой статус заказа",
+    "найди цену детали",
+    "есть ли остатки на складе",
     "сколько маленьких утят после бега есть хотят?",
 ]
 
@@ -45,6 +54,36 @@ EXPECTED_PLANS = {
     },
     "как получить новый ноутбук?": {
         "intent": "equipment_it_request",
+        "forbidden_answer_types": {"procedure"},
+        "preferred_sources": [],
+    },
+    "я опоздал на работу": {
+        "intent": "attendance_absence",
+        "forbidden_intents": {"vacation"},
+        "forbidden_answer_types": {"procedure"},
+        "preferred_sources": [],
+    },
+    "я заболел и не вышел": {
+        "intent": "attendance_absence",
+        "forbidden_intents": {"vacation"},
+        "forbidden_answer_types": {"procedure"},
+        "preferred_sources": [],
+    },
+    "какой статус заказа": {
+        "intent": "one_c_operational_lookup",
+        "forbidden_intents": {"document_flow", "order_disposition"},
+        "forbidden_answer_types": {"procedure"},
+        "preferred_sources": [],
+    },
+    "найди цену детали": {
+        "intent": "one_c_operational_lookup",
+        "forbidden_intents": {"document_flow", "order_disposition"},
+        "forbidden_answer_types": {"procedure"},
+        "preferred_sources": [],
+    },
+    "есть ли остатки на складе": {
+        "intent": "one_c_operational_lookup",
+        "forbidden_intents": {"document_flow", "order_disposition"},
         "forbidden_answer_types": {"procedure"},
         "preferred_sources": [],
     },
@@ -114,19 +153,28 @@ def main() -> int:
 
 def _validate_expectation(question: str, plan) -> list[str]:
     expected = EXPECTED_PLANS.get(question)
-    if expected is None:
-        return []
-
     errors = []
     unknown_sources = [
         source for source in plan.preferred_sources if source not in KNOWN_SOURCE_TITLES
     ]
     if unknown_sources:
         errors.append(f"{question!r}: unknown preferred_sources {unknown_sources!r}")
+    incompatible_sources = _incompatible_sources(plan.intent, plan.preferred_sources)
+    if incompatible_sources:
+        errors.append(
+            f"{question!r}: incompatible preferred_sources {incompatible_sources!r} "
+            f"for intent {plan.intent!r}"
+        )
+    if expected is None:
+        return errors
+
     if expected.get("intent") and plan.intent != expected["intent"]:
         errors.append(
             f"{question!r}: intent {plan.intent!r}, expected {expected['intent']!r}"
         )
+    forbidden_intents = expected.get("forbidden_intents", set())
+    if plan.intent in forbidden_intents:
+        errors.append(f"{question!r}: forbidden intent {plan.intent!r}")
     if expected.get("answer_type") and plan.answer_type != expected["answer_type"]:
         errors.append(
             f"{question!r}: answer_type {plan.answer_type!r}, "
@@ -141,6 +189,15 @@ def _validate_expectation(question: str, plan) -> list[str]:
             f"expected {expected['preferred_sources']!r}"
         )
     return errors
+
+
+def _incompatible_sources(intent: str, sources: list[str]) -> list[str]:
+    if intent not in INTENT_SOURCE_COMPATIBILITY:
+        return []
+    compatible_sources = INTENT_SOURCE_COMPATIBILITY[intent]
+    if not compatible_sources:
+        return list(sources)
+    return [source for source in sources if source not in compatible_sources]
 
 
 def _format_row(values: list[str]) -> str:
