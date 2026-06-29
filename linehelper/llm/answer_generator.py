@@ -6,13 +6,16 @@ import os
 import re
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from linehelper.llm.ollama_client import OllamaClient, OllamaError
 from linehelper.rag.prompt_builder import build_rag_prompt
 from linehelper.rag.retriever import RetrievedChunk, SemanticRetriever
+
+if TYPE_CHECKING:
+    from linehelper.rag.query_analyzer import QueryPlan
 
 
 DEFAULT_RETRIEVAL_LIMIT = 5
@@ -196,6 +199,11 @@ class ChatClient(Protocol):
         """Return assistant answer for chat messages."""
 
 
+class QueryAnalyzerClient(Protocol):
+    def analyze(self, question: str) -> QueryPlan:
+        """Return a structured retrieval plan for a user question."""
+
+
 @dataclass(frozen=True)
 class RagSource:
     title: str
@@ -231,6 +239,7 @@ class RagAnswer:
     context_score_ratio: float
     diagnostic_candidates: list[RagSource]
     response_kind: str = "answer"
+    query_plan: dict[str, Any] | None = None
 
 
 class RagAnswerError(RuntimeError):
@@ -248,9 +257,11 @@ class RagAnswerGenerator:
         db_path: Path | None = None,
         context_limit: int | None = None,
         context_score_ratio: float | None = None,
+        query_analyzer: QueryAnalyzerClient | None = None,
     ) -> None:
         self.retriever = retriever or SemanticRetriever(db_path)
         self.llm_client = llm_client or OllamaClient()
+        self.query_analyzer = query_analyzer
         self.context_limit = max(
             1,
             context_limit
@@ -295,10 +306,13 @@ class RagAnswerGenerator:
                 response_kind="clarification",
             )
 
+        query_plan = self._analyze_query_if_enabled(clean_question)
+        query_plan_diagnostics = _query_plan_diagnostics(query_plan)
         intent = detect_query_intent(clean_question)
-        chunks = self.retriever.retrieve(
+        chunks = self._retrieve_with_query_plan(
             clean_question,
-            limit=retrieval_limit,
+            query_plan=query_plan,
+            retrieval_limit=retrieval_limit,
             candidate_limit=candidate_limit,
         )
         if intent.name == "kp_commercial_offer":
@@ -320,6 +334,7 @@ class RagAnswerGenerator:
                     if not _chunk_contains_any_term(chunk, INTENT_ANCHOR_TERMS["ckp"])
                 ],
                 response_kind="partial_answer",
+                query_plan=query_plan_diagnostics,
             )
         if intent.name == "comparison":
             chunks = sorted(
@@ -373,6 +388,7 @@ class RagAnswerGenerator:
                 context_score_ratio=self.context_score_ratio,
                 diagnostic_candidates=diagnostic_candidates,
                 response_kind="no_answer",
+                query_plan=query_plan_diagnostics,
             )
 
         prompt = build_rag_prompt(clean_question, context_chunks)
@@ -403,6 +419,7 @@ class RagAnswerGenerator:
             context_limit=self.context_limit,
             context_score_ratio=self.context_score_ratio,
             diagnostic_candidates=diagnostic_candidates,
+            query_plan=query_plan_diagnostics,
         )
 
     def _retrieve_comparison_candidates(
@@ -421,6 +438,141 @@ class RagAnswerGenerator:
                 )
             )
         return chunks
+
+    def _analyze_query_if_enabled(self, question: str) -> QueryPlan | None:
+        if not _query_analyzer_enabled():
+            return None
+
+        if self.query_analyzer is None:
+            from linehelper.rag.query_analyzer import QueryAnalyzer
+
+            self.query_analyzer = QueryAnalyzer()
+
+        try:
+            return self.query_analyzer.analyze(question)
+        except Exception:
+            return None
+
+    def _retrieve_with_query_plan(
+        self,
+        question: str,
+        *,
+        query_plan: QueryPlan | None,
+        retrieval_limit: int,
+        candidate_limit: int,
+    ) -> list[RetrievedChunk]:
+        if query_plan is None:
+            return self.retriever.retrieve(
+                question,
+                limit=retrieval_limit,
+                candidate_limit=candidate_limit,
+            )
+
+        chunks: list[RetrievedChunk] = []
+        for retrieval_query in _query_plan_retrieval_queries(question, query_plan):
+            chunks.extend(
+                self.retriever.retrieve(
+                    retrieval_query,
+                    limit=retrieval_limit,
+                    candidate_limit=candidate_limit,
+                )
+            )
+
+        return sorted(
+            _boost_preferred_source_chunks(
+                _dedupe_chunks(chunks),
+                query_plan.preferred_sources,
+            ),
+            key=_chunk_score,
+            reverse=True,
+        )
+
+
+def _query_analyzer_enabled() -> bool:
+    return os.getenv("LINEHELPER_USE_QUERY_ANALYZER") == "1"
+
+
+def _query_plan_diagnostics(query_plan: QueryPlan | None) -> dict[str, Any] | None:
+    if query_plan is None:
+        return None
+    return {
+        "intent": query_plan.intent,
+        "answer_type": query_plan.answer_type,
+        "normalized_question": query_plan.normalized_question,
+        "query_expansions": list(query_plan.query_expansions),
+        "preferred_sources": list(query_plan.preferred_sources),
+        "confidence": query_plan.confidence,
+    }
+
+
+def _query_plan_retrieval_queries(question: str, query_plan: QueryPlan) -> list[str]:
+    queries = [
+        question,
+        query_plan.normalized_question,
+        *query_plan.query_expansions,
+    ]
+    result: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        clean_query = query.strip()
+        if not clean_query:
+            continue
+        key = _normalize_for_match(clean_query)
+        if key in seen:
+            continue
+        result.append(clean_query)
+        seen.add(key)
+    return result
+
+
+def _boost_preferred_source_chunks(
+    chunks: Sequence[RetrievedChunk],
+    preferred_sources: Sequence[str],
+) -> list[RetrievedChunk]:
+    if not preferred_sources:
+        return list(chunks)
+
+    boosted_chunks: list[RetrievedChunk] = []
+    normalized_sources = tuple(
+        _normalize_for_match(source)
+        for source in preferred_sources
+        if source.strip()
+    )
+    for chunk in chunks:
+        if _chunk_matches_preferred_source(chunk, normalized_sources):
+            score = _chunk_score(chunk)
+            boosted_chunks.append(
+                replace(
+                    chunk,
+                    final_score=score + 75.0,
+                    selection_reasons=[
+                        *(chunk.selection_reasons or []),
+                        "query analyzer preferred source boost",
+                    ],
+                )
+            )
+        else:
+            boosted_chunks.append(chunk)
+    return boosted_chunks
+
+
+def _chunk_matches_preferred_source(
+    chunk: RetrievedChunk,
+    normalized_sources: Sequence[str],
+) -> bool:
+    metadata = chunk.metadata or {}
+    haystack = _normalize_for_match(
+        " ".join(
+            str(value or "")
+            for value in (
+                chunk.title,
+                chunk.source,
+                metadata.get("source_file"),
+                metadata.get("logical_unit_title"),
+            )
+        )
+    )
+    return any(source in haystack for source in normalized_sources)
 
 
 def detect_query_intent(question: str) -> QueryIntent:

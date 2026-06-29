@@ -4,6 +4,7 @@ import pytest
 
 from linehelper.llm.answer_generator import RagAnswerError, RagAnswerGenerator
 from linehelper.llm.ollama_client import OllamaEmptyResponseError
+from linehelper.rag.query_analyzer import QueryPlan
 from linehelper.rag.retriever import RetrievedChunk
 
 
@@ -15,6 +16,82 @@ def test_empty_question_is_rejected() -> None:
 
     with pytest.raises(ValueError):
         generator.answer("   ")
+
+
+def test_query_analyzer_is_not_called_without_feature_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LINEHELPER_USE_QUERY_ANALYZER", raising=False)
+    analyzer = FakeQueryAnalyzer(_org_structure_plan())
+    retriever = FakeRetriever([])
+    generator = RagAnswerGenerator(
+        retriever=retriever,
+        llm_client=FakeClient("unused"),
+        query_analyzer=analyzer,
+    )
+
+    result = generator.answer("какие отделы есть в компании?")
+
+    assert analyzer.calls == []
+    assert retriever.calls == [("какие отделы есть в компании?", 5, 30)]
+    assert result.query_plan is None
+
+
+def test_query_analyzer_is_called_with_feature_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+    analyzer = FakeQueryAnalyzer(_org_structure_plan())
+    retriever = FakeRetriever([])
+    generator = RagAnswerGenerator(
+        retriever=retriever,
+        llm_client=FakeClient("unused"),
+        query_analyzer=analyzer,
+    )
+
+    result = generator.answer("какие отделы есть в компании?")
+
+    assert analyzer.calls == ["какие отделы есть в компании?"]
+    assert result.query_plan is not None
+    assert result.query_plan["intent"] == "org_structure"
+
+
+def test_query_analyzer_error_falls_back_to_old_retrieval_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+    retriever = FakeRetriever([])
+    generator = RagAnswerGenerator(
+        retriever=retriever,
+        llm_client=FakeClient("unused"),
+        query_analyzer=ErrorQueryAnalyzer(),
+    )
+
+    result = generator.answer("какие отделы есть в компании?")
+
+    assert retriever.calls == [("какие отделы есть в компании?", 5, 30)]
+    assert result.query_plan is None
+    assert result.response_kind == "no_answer"
+
+
+def test_query_analyzer_expands_org_structure_retrieval_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+    retriever = FakeRetriever([])
+    generator = RagAnswerGenerator(
+        retriever=retriever,
+        llm_client=FakeClient("unused"),
+        query_analyzer=FakeQueryAnalyzer(_org_structure_plan()),
+    )
+
+    generator.answer("какие отделы есть в компании?")
+
+    retrieval_queries = [call[0] for call in retriever.calls]
+    assert "какие отделы есть в компании?" in retrieval_queries
+    assert "Какие подразделения есть в организационной структуре компании?" in retrieval_queries
+    assert "оргсхема компании" in retrieval_queries
+    assert "организационная структура компании" in retrieval_queries
 
 
 def test_answer_generator_uses_retriever_prompt_and_sources() -> None:
@@ -545,6 +622,38 @@ class ErrorClient:
 
     def chat(self, messages: list[dict[str, str]]) -> str:
         raise OllamaEmptyResponseError("empty")
+
+
+class FakeQueryAnalyzer:
+    def __init__(self, plan: QueryPlan) -> None:
+        self.plan = plan
+        self.calls: list[str] = []
+
+    def analyze(self, question: str) -> QueryPlan:
+        self.calls.append(question)
+        return self.plan
+
+
+class ErrorQueryAnalyzer:
+    def analyze(self, question: str) -> QueryPlan:
+        raise RuntimeError("query analyzer failed")
+
+
+def _org_structure_plan() -> QueryPlan:
+    return QueryPlan(
+        intent="org_structure",
+        normalized_question="Какие подразделения есть в организационной структуре компании?",
+        query_expansions=[
+            "оргсхема компании",
+            "организационная структура компании",
+        ],
+        preferred_sources=["2026-03-03_Оргсхема _ Компании"],
+        answer_type="list",
+        needs_clarification=False,
+        clarification_question=None,
+        confidence=0.9,
+        notes="test plan",
+    )
 
 
 def _chunk() -> RetrievedChunk:
