@@ -13,6 +13,8 @@ from linehelper.llm.ollama_client import OllamaClient
 
 DEFAULT_ANALYZER_MODEL = "qwen2.5:3b"
 ANALYZER_NUM_PREDICT = 900
+ORGANIZATION_STRUCTURED_SOURCE_TITLE = "bvr_company_structure_instruction_v2 (2).txt"
+ORGANIZATION_LEGACY_SOURCE_TITLE = "2026-03-03_Оргсхема _ Компании"
 
 ALLOWED_INTENTS = frozenset(
     {
@@ -58,7 +60,8 @@ ALLOWED_ANSWER_TYPES = frozenset(
 
 KNOWN_SOURCE_TITLES = frozenset(
     {
-        "2026-03-03_Оргсхема _ Компании",
+        ORGANIZATION_LEGACY_SOURCE_TITLE,
+        ORGANIZATION_STRUCTURED_SOURCE_TITLE,
         "ИП-0002 Цели и замыслы компании Serviceline",
         "ИП-0003 ЦКП SERVICELINE",
         "ИП-0004 Структура ЗРС",
@@ -78,8 +81,14 @@ INTENT_SOURCE_COMPATIBILITY: dict[str, set[str]] = {
         "ИП-0003 ЦКП SERVICELINE",
     },
     "company_ckp": {"ИП-0003 ЦКП SERVICELINE"},
-    "org_structure": {"2026-03-03_Оргсхема _ Компании"},
-    "roles_responsibility": {"2026-03-03_Оргсхема _ Компании"},
+    "org_structure": {
+        ORGANIZATION_LEGACY_SOURCE_TITLE,
+        ORGANIZATION_STRUCTURED_SOURCE_TITLE,
+    },
+    "roles_responsibility": {
+        ORGANIZATION_LEGACY_SOURCE_TITLE,
+        ORGANIZATION_STRUCTURED_SOURCE_TITLE,
+    },
     "zrs_definition": {"ИП-0004 Структура ЗРС"},
     "zrs_approval": {
         "ИП-0004 Структура ЗРС",
@@ -398,16 +407,8 @@ def fallback_query_plan(question: str) -> QueryPlan:
             notes="Fallback: вопрос про организационную структуру.",
         )
 
-    if _contains_any(
-        normalized,
-        ("кто отвечает", "какой отдел занимается", "функции отдела", "ответственный"),
-    ):
-        return _simple_plan(
-            clean_question,
-            intent="roles_responsibility",
-            answer_type="list",
-            query_expansions=["ответственность отделов", "функции подразделений"],
-        )
+    if _is_roles_responsibility_question(normalized):
+        return _roles_responsibility_plan(clean_question)
 
     if _contains_any(normalized, ("отпуск", "отпуска", "отпускной")):
         return _simple_plan(
@@ -670,6 +671,9 @@ def _sanitize_plan(plan: QueryPlan, question: str) -> QueryPlan:
     if _is_company_identity_question(normalized_question):
         return _with_compatible_sources(fallback_query_plan(question))
 
+    if _is_roles_responsibility_question(normalized_question):
+        return _with_compatible_sources(_roles_responsibility_plan(question))
+
     if plan.intent == "company_ckp" or _is_ckp_question(normalized_question):
         return _sanitize_ckp_plan(plan)
 
@@ -841,6 +845,20 @@ def _simple_plan(
     )
 
 
+def _roles_responsibility_plan(question: str) -> QueryPlan:
+    return _simple_plan(
+        question,
+        intent="roles_responsibility",
+        answer_type="list",
+        query_expansions=[
+            "руководитель подразделения",
+            "ответственный сотрудник",
+            "руководитель закупок",
+            "контакт ответственного",
+        ],
+    )
+
+
 def _load_analyzer_model() -> str:
     return (
         os.getenv("OLLAMA_ANALYZER_MODEL")
@@ -879,6 +897,26 @@ def _is_company_identity_question(question: str) -> bool:
             "расскажи кратко о компании",
             "что такое serviceline",
             "что такое сервислайн",
+        ),
+    )
+
+
+def _is_roles_responsibility_question(question: str) -> bool:
+    return _contains_any(
+        question,
+        (
+            "кто отвечает",
+            "кто руководит",
+            "кто главный",
+            "начальник",
+            "руководитель",
+            "к кому обратиться",
+            "кому направить",
+            "контакт",
+            "телефон",
+            "какой отдел занимается",
+            "функции отдела",
+            "ответственный",
         ),
     )
 

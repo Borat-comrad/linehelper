@@ -5,6 +5,9 @@ import json
 import pytest
 
 from linehelper.rag.query_analyzer import (
+    INTENT_SOURCE_COMPATIBILITY,
+    KNOWN_SOURCE_TITLES,
+    ORGANIZATION_STRUCTURED_SOURCE_TITLE,
     QueryAnalyzer,
     build_query_analyzer_prompt,
 )
@@ -21,6 +24,13 @@ ORG_STRUCTURE_RESPONSE = {
     "confidence": 0.9,
     "notes": "Вопрос про оргструктуру.",
 }
+
+
+def test_structured_organization_source_is_known_and_compatible() -> None:
+    assert ORGANIZATION_STRUCTURED_SOURCE_TITLE == "bvr_company_structure_instruction_v2 (2).txt"
+    assert ORGANIZATION_STRUCTURED_SOURCE_TITLE in KNOWN_SOURCE_TITLES
+    assert ORGANIZATION_STRUCTURED_SOURCE_TITLE in INTENT_SOURCE_COMPATIBILITY["org_structure"]
+    assert ORGANIZATION_STRUCTURED_SOURCE_TITLE in INTENT_SOURCE_COMPATIBILITY["roles_responsibility"]
 
 
 def test_valid_json_returns_query_plan() -> None:

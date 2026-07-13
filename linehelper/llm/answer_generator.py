@@ -125,6 +125,41 @@ INTENT_PREFERRED_TERMS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+ORGANIZATION_STRUCTURED_DOC_TYPES = frozenset(
+    {
+        "organization_overview",
+        "organization_unit",
+        "employee_role",
+        "responsibility_route",
+        "organization_status",
+        "organization_vacancy",
+        "role_combination",
+    }
+)
+ORGANIZATION_STRUCTURED_SOURCE_TITLE = "bvr_company_structure_instruction_v2 (2).txt"
+ORGANIZATION_KNOWLEDGE_DOMAIN = "organization_structure"
+ORGANIZATION_INTENTS = frozenset({"org_structure", "roles_responsibility"})
+UNIT_IDENTIFIER_RE = re.compile(r"(?<![0-9A-Za-zА-Яа-яЁё])\d{1,2}[А-Яа-яA-Za-z]?(?![0-9A-Za-zА-Яа-яЁё])")
+ORGANIZATION_HIGH_SIGNAL_IDENTIFIER_RE = re.compile(
+    r"(?<![0-9A-Za-zА-Яа-яЁё])(?:KRONES|KHS|HEUFT|SIDEL|SMI|IMETA|EFES|ЭФЕС)(?![0-9A-Za-zА-Яа-яЁё])",
+    re.IGNORECASE,
+)
+LEADERSHIP_TERMS = (
+    "кто руководит",
+    "кто главный",
+    "начальник",
+    "руководитель",
+    "руководител",
+)
+CONTACT_ROUTE_TERMS = (
+    "к кому обратиться",
+    "кому направить",
+    "кто отвечает",
+    "контакт",
+    "телефон",
+    "написать",
+)
+
 _TOKEN_RE = re.compile(r"[0-9A-Za-zА-Яа-яЁё_]+")
 _KP_RE = re.compile(
     r"(?<![0-9A-Za-zА-Яа-яЁё])кп(?![0-9A-Za-zА-Яа-яЁё])",
@@ -242,6 +277,12 @@ class RagAnswer:
     query_plan: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class QueryAnalysisResult:
+    plan: QueryPlan | None
+    diagnostics: dict[str, Any]
+
+
 class RagAnswerError(RuntimeError):
     """Raised when the read-only RAG answer flow cannot complete."""
 
@@ -288,7 +329,13 @@ class RagAnswerGenerator:
             raise ValueError("question must not be empty")
 
         started_at = time.monotonic()
-        clarification = should_ask_clarification(clean_question)
+        query_analysis = self._analyze_query_if_enabled(clean_question)
+        query_plan = query_analysis.plan
+        query_plan_diagnostics = query_analysis.diagnostics
+
+        clarification = _query_plan_clarification(
+            query_plan
+        ) or should_ask_clarification(clean_question)
         if clarification is not None:
             return RagAnswer(
                 question=clean_question,
@@ -304,16 +351,20 @@ class RagAnswerGenerator:
                 context_score_ratio=self.context_score_ratio,
                 diagnostic_candidates=[],
                 response_kind="clarification",
+                query_plan=query_plan_diagnostics,
             )
 
-        query_plan = self._analyze_query_if_enabled(clean_question)
-        query_plan_diagnostics = _query_plan_diagnostics(query_plan)
-        intent = detect_query_intent(clean_question)
+        intent = _runtime_query_intent(clean_question, query_plan)
         chunks = self._retrieve_with_query_plan(
             clean_question,
             query_plan=query_plan,
             retrieval_limit=retrieval_limit,
             candidate_limit=candidate_limit,
+        )
+        chunks = _boost_organization_chunks(
+            chunks,
+            clean_question,
+            intent=intent,
         )
         if intent.name == "kp_commercial_offer":
             return RagAnswer(
@@ -439,19 +490,36 @@ class RagAnswerGenerator:
             )
         return chunks
 
-    def _analyze_query_if_enabled(self, question: str) -> QueryPlan | None:
+    def _analyze_query_if_enabled(self, question: str) -> QueryAnalysisResult:
         if not _query_analyzer_enabled():
-            return None
+            return QueryAnalysisResult(plan=None, diagnostics={"enabled": False})
 
         if self.query_analyzer is None:
-            from linehelper.rag.query_analyzer import QueryAnalyzer
+            try:
+                from linehelper.rag.query_analyzer import QueryAnalyzer
 
-            self.query_analyzer = QueryAnalyzer()
+                self.query_analyzer = QueryAnalyzer()
+            except Exception as exc:
+                return QueryAnalysisResult(
+                    plan=None,
+                    diagnostics=_query_plan_error_diagnostics(exc),
+                )
 
         try:
-            return self.query_analyzer.analyze(question)
-        except Exception:
-            return None
+            query_plan = self.query_analyzer.analyze(question)
+        except Exception as exc:
+            return QueryAnalysisResult(
+                plan=None,
+                diagnostics=_query_plan_error_diagnostics(exc),
+            )
+
+        diagnostics = _query_plan_diagnostics(query_plan)
+        if not _query_plan_is_usable(query_plan):
+            diagnostics["fallback_used"] = True
+            diagnostics["fallback_reason"] = "empty_or_unknown_query_plan"
+            return QueryAnalysisResult(plan=None, diagnostics=diagnostics)
+
+        return QueryAnalysisResult(plan=query_plan, diagnostics=diagnostics)
 
     def _retrieve_with_query_plan(
         self,
@@ -492,10 +560,9 @@ def _query_analyzer_enabled() -> bool:
     return os.getenv("LINEHELPER_USE_QUERY_ANALYZER") == "1"
 
 
-def _query_plan_diagnostics(query_plan: QueryPlan | None) -> dict[str, Any] | None:
-    if query_plan is None:
-        return None
+def _query_plan_diagnostics(query_plan: QueryPlan) -> dict[str, Any]:
     return {
+        "enabled": True,
         "intent": query_plan.intent,
         "answer_type": query_plan.answer_type,
         "normalized_question": query_plan.normalized_question,
@@ -505,9 +572,85 @@ def _query_plan_diagnostics(query_plan: QueryPlan | None) -> dict[str, Any] | No
     }
 
 
+def _query_plan_error_diagnostics(exc: Exception) -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "error": f"{type(exc).__name__}: {exc}",
+        "fallback_used": True,
+    }
+
+
+def _query_plan_is_usable(query_plan: QueryPlan) -> bool:
+    if query_plan.intent == "unknown":
+        return False
+    return bool(
+        query_plan.normalized_question.strip()
+        or query_plan.query_expansions
+        or query_plan.preferred_sources
+    )
+
+
+def _query_plan_clarification(query_plan: QueryPlan | None) -> str | None:
+    if query_plan is None or not query_plan.needs_clarification:
+        return None
+    if query_plan.clarification_question:
+        return query_plan.clarification_question
+    if query_plan.answer_type == "clarification":
+        return CLARIFY_KP_MESSAGE
+    return None
+
+
+def _runtime_query_intent(question: str, query_plan: QueryPlan | None) -> QueryIntent:
+    old_intent = detect_query_intent(question)
+    if query_plan is None:
+        return old_intent
+
+    if query_plan.intent == "company_ckp":
+        return _intent("ckp", require_preferred_context=True)
+
+    if query_plan.intent in {"kp_commercial_offer", "comparison"}:
+        return QueryIntent(name=query_plan.intent)
+
+    if query_plan.intent in {
+        "off_topic",
+        "one_c_operational_lookup",
+        "equipment_it_request",
+        "document_loss",
+        "attendance_absence",
+    }:
+        return QueryIntent(name=query_plan.intent, require_preferred_context=True)
+
+    if query_plan.intent in {
+        "company_identity",
+        "document_flow",
+        "org_structure",
+        "roles_responsibility",
+        "zrs_definition",
+        "zrs_approval",
+        "contract_approval",
+        "business_trip",
+        "order_disposition",
+        "task_management",
+        "weekly_planning",
+    }:
+        anchor_terms = old_intent.anchor_terms
+        return QueryIntent(
+            name=query_plan.intent,
+            anchor_terms=anchor_terms,
+            preferred_terms=old_intent.preferred_terms,
+            require_preferred_context=old_intent.require_preferred_context,
+            min_context_score=old_intent.min_context_score,
+        )
+
+    return old_intent
+
+
 def _query_plan_retrieval_queries(question: str, query_plan: QueryPlan) -> list[str]:
+    unit_identifiers = _unit_identifiers(question)
+    high_signal_identifiers = _high_signal_identifiers(question)
     queries = [
         question,
+        *high_signal_identifiers,
         query_plan.normalized_question,
         *query_plan.query_expansions,
     ]
@@ -522,6 +665,20 @@ def _query_plan_retrieval_queries(question: str, query_plan: QueryPlan) -> list[
             continue
         result.append(clean_query)
         seen.add(key)
+        if unit_identifiers and not _contains_any_unit_identifier(clean_query, unit_identifiers):
+            identifier_query = f"{clean_query} {' '.join(unit_identifiers)}"
+            identifier_key = _normalize_for_match(identifier_query)
+            if identifier_key not in seen:
+                result.append(identifier_query)
+                seen.add(identifier_key)
+        for identifier in high_signal_identifiers:
+            if _normalize_for_match(identifier) in key:
+                continue
+            identifier_query = f"{clean_query} {identifier}"
+            identifier_key = _normalize_for_match(identifier_query)
+            if identifier_key not in seen:
+                result.append(identifier_query)
+                seen.add(identifier_key)
     return result
 
 
@@ -651,7 +808,7 @@ def select_context_chunks(
 
     max_chunks = max(1, max_chunks)
     score_ratio = max(0.0, min(score_ratio, 1.0))
-    candidates = list(chunks)
+    candidates = _dedupe_context_candidates(chunks)
     intent = intent or detect_query_intent(question)
 
     if intent.name == "comparison":
@@ -678,12 +835,23 @@ def select_context_chunks(
         if anchored:
             candidates = anchored
 
-    top_score = max(_chunk_score(chunk) for chunk in candidates)
+    ranked_candidates = _sort_context_candidates(question, candidates, intent=intent)
+    candidates = ranked_candidates
+    top_score = max(_context_selection_score(chunk, question, intent=intent) for chunk in candidates)
     if top_score > 0 and score_ratio > 0:
         cutoff = top_score * score_ratio
         candidates = [
-            chunk for chunk in candidates if _chunk_score(chunk) >= cutoff
+            chunk
+            for chunk in candidates
+            if _context_selection_score(chunk, question, intent=intent) >= cutoff
         ]
+
+    candidates = _ensure_organization_context_diversity(
+        question,
+        candidates,
+        ranked_candidates,
+        intent=intent,
+    )
 
     if intent.name == "unknown" and candidates:
         candidates = [
@@ -720,6 +888,342 @@ def has_sufficient_context(
         _chunk_question_evidence_score(chunk, significant_terms) >= 2
         for chunk in chunks
     )
+
+
+def _boost_organization_chunks(
+    chunks: Sequence[RetrievedChunk],
+    question: str,
+    *,
+    intent: QueryIntent,
+) -> list[RetrievedChunk]:
+    if intent.name not in ORGANIZATION_INTENTS:
+        return list(chunks)
+
+    boosted: list[RetrievedChunk] = []
+    for chunk in chunks:
+        boost = _organization_context_boost(chunk, question, intent=intent)
+        if boost <= 0:
+            boosted.append(chunk)
+            continue
+        boosted.append(
+            replace(
+                chunk,
+                final_score=_chunk_score(chunk) + boost,
+                selection_reasons=[
+                    *(chunk.selection_reasons or []),
+                    f"organization metadata boost +{boost:.0f}",
+                ],
+            )
+        )
+    return sorted(boosted, key=_chunk_score, reverse=True)
+
+
+def _sort_context_candidates(
+    question: str,
+    chunks: Sequence[RetrievedChunk],
+    *,
+    intent: QueryIntent,
+) -> list[RetrievedChunk]:
+    return sorted(
+        chunks,
+        key=lambda chunk: _context_selection_score(chunk, question, intent=intent),
+        reverse=True,
+    )
+
+
+def _context_selection_score(
+    chunk: RetrievedChunk,
+    question: str,
+    *,
+    intent: QueryIntent,
+) -> float:
+    score = _chunk_score(chunk)
+    if intent.name in ORGANIZATION_INTENTS:
+        score += _organization_context_boost(chunk, question, intent=intent)
+    return score
+
+
+def _organization_context_boost(
+    chunk: RetrievedChunk,
+    question: str,
+    *,
+    intent: QueryIntent,
+) -> float:
+    if intent.name not in ORGANIZATION_INTENTS:
+        return 0.0
+
+    metadata = chunk.metadata or {}
+    doc_type = _organization_doc_type(chunk)
+    is_structured = _is_structured_organization_chunk(chunk)
+    boost = 0.0
+
+    if is_structured:
+        boost += 55.0
+
+    if _chunk_matches_unit_identifier(chunk, _unit_identifiers(question)):
+        boost += 320.0
+
+    if _chunk_matches_high_signal_identifier(chunk, _high_signal_identifiers(question)):
+        boost += 300.0
+
+    if intent.name == "org_structure":
+        if _is_org_chart_rules_question(question) and _is_org_chart_rules_chunk(chunk):
+            boost += 320.0
+        boost += {
+            "organization_unit": 170.0,
+            "organization_overview": 80.0,
+            "employee_role": 35.0,
+            "responsibility_route": 25.0,
+            "role_combination": 20.0,
+            "organization_status": 15.0,
+            "organization_vacancy": 15.0,
+        }.get(doc_type, 0.0)
+
+    elif intent.name == "roles_responsibility":
+        topic_matches = _organization_topic_matches(chunk, question)
+        unit_matches = _chunk_matches_unit_identifier(chunk, _unit_identifiers(question))
+        if _is_leadership_question(question):
+            unit_head_bonus = 500.0 if metadata.get("head_name") and (topic_matches or unit_matches) else 45.0
+            boost += {
+                "organization_unit": unit_head_bonus,
+                "employee_role": 440.0 if topic_matches or unit_matches else 35.0,
+                "role_combination": 120.0 if topic_matches or unit_matches else 25.0,
+                "responsibility_route": 0.0,
+            }.get(doc_type, 0.0)
+        elif _is_contact_route_question(question):
+            route_bonus = 335.0 if topic_matches or unit_matches else 70.0
+            boost += {
+                "responsibility_route": route_bonus,
+                "employee_role": 145.0 if topic_matches or unit_matches else 45.0,
+                "organization_unit": 75.0 if topic_matches or unit_matches else 30.0,
+                "role_combination": 60.0 if topic_matches or unit_matches else 20.0,
+            }.get(doc_type, 0.0)
+        else:
+            boost += {
+                "organization_unit": 130.0,
+                "employee_role": 120.0,
+                "responsibility_route": 80.0,
+                "role_combination": 75.0,
+            }.get(doc_type, 0.0)
+
+    return boost
+
+
+def _dedupe_context_candidates(chunks: Sequence[RetrievedChunk]) -> list[RetrievedChunk]:
+    result: list[RetrievedChunk] = []
+    seen: set[tuple[str, str, str | None]] = set()
+    for chunk in chunks:
+        key = (chunk.source, chunk.title, chunk.section)
+        if key in seen:
+            continue
+        result.append(chunk)
+        seen.add(key)
+    return result
+
+
+def _ensure_organization_context_diversity(
+    question: str,
+    candidates: Sequence[RetrievedChunk],
+    ranked_candidates: Sequence[RetrievedChunk],
+    *,
+    intent: QueryIntent,
+) -> list[RetrievedChunk]:
+    selected = list(candidates)
+    if intent.name not in ORGANIZATION_INTENTS or not _is_leadership_question(question):
+        return selected
+
+    if any(_organization_doc_type(chunk) == "employee_role" for chunk in selected):
+        return selected
+
+    for chunk in ranked_candidates:
+        if _organization_doc_type(chunk) != "employee_role":
+            continue
+        if not (
+            _organization_topic_matches(chunk, question)
+            or _chunk_matches_unit_identifier(chunk, _unit_identifiers(question))
+        ):
+            continue
+        selected.append(chunk)
+        return _dedupe_context_candidates(selected)
+
+    return selected
+
+
+def _is_structured_organization_chunk(chunk: RetrievedChunk) -> bool:
+    metadata = chunk.metadata or {}
+    return (
+        metadata.get("knowledge_domain") == ORGANIZATION_KNOWLEDGE_DOMAIN
+        or _organization_doc_type(chunk) in ORGANIZATION_STRUCTURED_DOC_TYPES
+        or ORGANIZATION_STRUCTURED_SOURCE_TITLE in chunk.source
+        or metadata.get("source_file") == ORGANIZATION_STRUCTURED_SOURCE_TITLE
+    )
+
+
+def _organization_doc_type(chunk: RetrievedChunk) -> str:
+    metadata = chunk.metadata or {}
+    return str(chunk.doc_type or metadata.get("doc_type") or "").strip()
+
+
+def _unit_identifiers(question: str) -> tuple[str, ...]:
+    identifiers = []
+    seen: set[str] = set()
+    for match in UNIT_IDENTIFIER_RE.findall(question):
+        if not any(char.isdigit() for char in match):
+            continue
+        identifier = match.upper()
+        key = identifier.casefold()
+        if key in seen:
+            continue
+        identifiers.append(identifier)
+        seen.add(key)
+    return tuple(identifiers)
+
+
+def _high_signal_identifiers(question: str) -> tuple[str, ...]:
+    identifiers = []
+    seen: set[str] = set()
+    for match in ORGANIZATION_HIGH_SIGNAL_IDENTIFIER_RE.findall(question):
+        identifier = match.upper()
+        key = identifier.casefold()
+        if key in seen:
+            continue
+        identifiers.append(identifier)
+        seen.add(key)
+    return tuple(identifiers)
+
+
+def _contains_any_unit_identifier(value: str, identifiers: Sequence[str]) -> bool:
+    haystack = _normalize_for_match(value)
+    return any(_normalize_for_match(identifier) in haystack for identifier in identifiers)
+
+
+def _chunk_matches_unit_identifier(
+    chunk: RetrievedChunk,
+    identifiers: Sequence[str],
+) -> bool:
+    if not identifiers:
+        return False
+    metadata = chunk.metadata or {}
+    haystack = _normalize_for_match(
+        " ".join(
+            str(value or "")
+            for value in (
+                chunk.title,
+                chunk.section,
+                metadata.get("unit_number"),
+                metadata.get("unit_id"),
+                metadata.get("unit_ids"),
+                metadata.get("record_key"),
+            )
+        )
+    )
+    return any(_normalize_for_match(identifier) in haystack for identifier in identifiers)
+
+
+def _chunk_matches_high_signal_identifier(
+    chunk: RetrievedChunk,
+    identifiers: Sequence[str],
+) -> bool:
+    if not identifiers:
+        return False
+    metadata = chunk.metadata or {}
+    haystack = _normalize_for_match(
+        " ".join(
+            str(value or "")
+            for value in (
+                chunk.title,
+                chunk.section,
+                chunk.doc_type,
+                metadata.get("record_key"),
+                metadata.get("employee_name"),
+                metadata.get("unit_name"),
+                metadata.get("topic"),
+            )
+        )
+    )
+    return any(_normalize_for_match(identifier) in haystack for identifier in identifiers)
+
+
+def _is_leadership_question(question: str) -> bool:
+    normalized = _normalize_for_match(question)
+    return _contains_any(normalized, LEADERSHIP_TERMS)
+
+
+def _is_contact_route_question(question: str) -> bool:
+    normalized = _normalize_for_match(question)
+    return _contains_any(normalized, CONTACT_ROUTE_TERMS)
+
+
+def _organization_topic_matches(chunk: RetrievedChunk, question: str) -> bool:
+    terms = _organization_topic_terms(question)
+    if not terms:
+        return False
+    metadata = chunk.metadata or {}
+    haystack = _normalize_for_match(
+        " ".join(
+            str(value or "")
+            for value in (
+                chunk.title,
+                chunk.section,
+                chunk.doc_type,
+                metadata.get("source_file"),
+                metadata.get("record_key"),
+                metadata.get("employee_name"),
+                metadata.get("unit_name"),
+                metadata.get("topic"),
+                chunk.text,
+            )
+        )
+    )
+    return any(term in haystack for term in terms)
+
+
+def _organization_topic_terms(question: str) -> tuple[str, ...]:
+    normalized = _normalize_for_match(question)
+    known_terms = (
+        "закуп",
+        "логист",
+        "тамож",
+        "склад",
+        "достав",
+        "отгруз",
+        "krones",
+        "khs",
+        "heuft",
+        "sidel",
+        "smi",
+        "imeta",
+        "кадр",
+        "проект",
+        "модел",
+        "эфес",
+        "efes",
+    )
+    return tuple(term for term in known_terms if term in normalized)
+
+
+def _is_org_chart_rules_question(question: str) -> bool:
+    normalized = _normalize_for_match(question)
+    return "оргсхем" in normalized and _contains_any(
+        normalized,
+        ("что такое", "для чего", "зачем", "правила", "регламент"),
+    )
+
+
+def _is_org_chart_rules_chunk(chunk: RetrievedChunk) -> bool:
+    metadata = chunk.metadata or {}
+    haystack = _normalize_for_match(
+        " ".join(
+            str(value or "")
+            for value in (
+                chunk.title,
+                chunk.source,
+                chunk.section,
+                metadata.get("source_file"),
+            )
+        )
+    )
+    return "регламент" in haystack and "оргсхем" in haystack
 
 
 def is_comparison_question(question: str) -> bool:

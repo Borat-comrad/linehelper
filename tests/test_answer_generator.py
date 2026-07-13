@@ -34,7 +34,7 @@ def test_query_analyzer_is_not_called_without_feature_flag(
 
     assert analyzer.calls == []
     assert retriever.calls == [("какие отделы есть в компании?", 5, 30)]
-    assert result.query_plan is None
+    assert result.query_plan == {"enabled": False}
 
 
 def test_query_analyzer_is_called_with_feature_flag(
@@ -53,6 +53,7 @@ def test_query_analyzer_is_called_with_feature_flag(
 
     assert analyzer.calls == ["какие отделы есть в компании?"]
     assert result.query_plan is not None
+    assert result.query_plan["enabled"] is True
     assert result.query_plan["intent"] == "org_structure"
 
 
@@ -70,7 +71,10 @@ def test_query_analyzer_error_falls_back_to_old_retrieval_path(
     result = generator.answer("какие отделы есть в компании?")
 
     assert retriever.calls == [("какие отделы есть в компании?", 5, 30)]
-    assert result.query_plan is None
+    assert result.query_plan is not None
+    assert result.query_plan["enabled"] is True
+    assert result.query_plan["fallback_used"] is True
+    assert "query analyzer failed" in result.query_plan["error"]
     assert result.response_kind == "no_answer"
 
 
@@ -92,6 +96,319 @@ def test_query_analyzer_expands_org_structure_retrieval_queries(
     assert "Какие подразделения есть в организационной структуре компании?" in retrieval_queries
     assert "оргсхема компании" in retrieval_queries
     assert "организационная структура компании" in retrieval_queries
+
+
+def test_query_analyzer_keeps_unit_identifier_in_expanded_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+    retriever = FakeRetriever([])
+    generator = RagAnswerGenerator(
+        retriever=retriever,
+        llm_client=FakeClient("unused"),
+        query_analyzer=FakeQueryAnalyzer(_org_structure_plan()),
+    )
+
+    generator.answer("что расскажешь про отдел 4А?")
+
+    retrieval_queries = [call[0] for call in retriever.calls]
+    assert "оргсхема компании 4А" in retrieval_queries
+    assert "организационная структура компании 4А" in retrieval_queries
+
+
+def test_preferred_source_is_not_hard_filter_for_exact_organization_unit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+    organization_unit = _organization_chunk(
+        title="Отделение 4А — Закупки",
+        doc_type="organization_unit",
+        text="Отделение 4А — Закупки. Руководитель: Силаева Юлия. ЦКП: заказы подготовлены к отгрузке.",
+        final_score=420.0,
+        metadata={
+            "knowledge_domain": "organization_structure",
+            "source_file": "bvr_company_structure_instruction_v2 (2).txt",
+            "record_key": "organization_unit:division_4a:2025-12-17",
+            "unit_number": "4А",
+            "head_name": "Силаева Юлия",
+        },
+    )
+    old_pdf = _organization_chunk(
+        title="2026-03-03_Оргсхема _ Компании",
+        doc_type="org_structure",
+        source="data/raw_docs/2026-03-03_Оргсхема _ Компании.pdf",
+        text="Оргсхема компании описывает крупные отделения.",
+        final_score=380.0,
+        metadata={"source_file": "2026-03-03_Оргсхема _ Компании.pdf"},
+    )
+    generator = RagAnswerGenerator(
+        retriever=FakeRetriever([organization_unit, old_pdf]),
+        llm_client=FakeClient("ok"),
+        query_analyzer=FakeQueryAnalyzer(_org_structure_plan()),
+    )
+
+    result = generator.answer("что расскажешь про отдел 4А?")
+
+    assert result.response_kind == "answer"
+    assert result.sources[0].title == "Отделение 4А — Закупки"
+    assert "Отделение 4А — Закупки" in generator.llm_client.messages[-1]["content"]
+
+
+def test_leadership_context_keeps_employee_contact_after_exact_unit_boost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+    organization_unit = _organization_chunk(
+        title="Отделение 4А — Закупки",
+        doc_type="organization_unit",
+        text="Отделение 4А — Закупки. Руководитель: Силаева Юлия.",
+        final_score=600.0,
+        metadata={
+            "knowledge_domain": "organization_structure",
+            "source_file": "bvr_company_structure_instruction_v2 (2).txt",
+            "record_key": "organization_unit:division_4a:2025-12-17",
+            "unit_number": "4А",
+            "head_name": "Силаева Юлия",
+        },
+    )
+    employee = _organization_chunk(
+        title="Силаева Юлия",
+        doc_type="employee_role",
+        text=(
+            "Силаева Юлия. Должности: руководитель отделения закупок (4А). "
+            "Рабочий телефон: +7 961 105-03-08."
+        ),
+        final_score=160.0,
+        metadata={
+            "knowledge_domain": "organization_structure",
+            "source_file": "bvr_company_structure_instruction_v2 (2).txt",
+            "record_key": "employee:silaeva_yuliya:2025-12-17",
+            "employee_name": "Силаева Юлия",
+        },
+    )
+    generator = RagAnswerGenerator(
+        retriever=FakeRetriever([organization_unit, employee]),
+        llm_client=FakeClient("ok"),
+        query_analyzer=FakeQueryAnalyzer(_roles_responsibility_plan()),
+    )
+
+    result = generator.answer("Кто руководит отделением 4А — Закупки?")
+
+    assert [source.title for source in result.sources] == [
+        "Отделение 4А — Закупки",
+        "Силаева Юлия",
+    ]
+    assert "+7 961 105-03-08" in generator.llm_client.messages[-1]["content"]
+
+
+def test_leadership_question_prefers_unit_and_employee_over_brand_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+    route = _organization_chunk(
+        title="Маршрут: ЗАКУПКИ: KRONES / KHS / HEUFT",
+        doc_type="responsibility_route",
+        text="По вопросам закупок KRONES обращаться к Карачурину Денису.",
+        final_score=320.0,
+        metadata={
+            "knowledge_domain": "organization_structure",
+            "source_file": "bvr_company_structure_instruction_v2 (2).txt",
+            "record_key": "responsibility_route:zakupki_krones_khs_heuft:2025-12-17",
+        },
+    )
+    unit = _organization_chunk(
+        title="Отделение 4А — Закупки",
+        doc_type="organization_unit",
+        text="Отделение 4А — Закупки. Руководитель: Силаева Юлия.",
+        final_score=240.0,
+        metadata={
+            "knowledge_domain": "organization_structure",
+            "source_file": "bvr_company_structure_instruction_v2 (2).txt",
+            "record_key": "organization_unit:division_4a:2025-12-17",
+            "head_name": "Силаева Юлия",
+        },
+    )
+    employee = _organization_chunk(
+        title="Силаева Юлия",
+        doc_type="employee_role",
+        text="Силаева Юлия. Должности: руководитель отделения 4А — Закупки; начальник отдела 11А.",
+        final_score=230.0,
+        metadata={
+            "knowledge_domain": "organization_structure",
+            "source_file": "bvr_company_structure_instruction_v2 (2).txt",
+            "record_key": "employee:silaeva_yuliya:2025-12-17",
+            "employee_name": "Силаева Юлия",
+        },
+    )
+    generator = RagAnswerGenerator(
+        retriever=FakeRetriever([route, unit, employee]),
+        llm_client=FakeClient("ok"),
+        query_analyzer=FakeQueryAnalyzer(_roles_responsibility_plan()),
+    )
+
+    result = generator.answer("кто главный у закупщиков?")
+
+    assert [source.title for source in result.sources[:2]] == [
+        "Отделение 4А — Закупки",
+        "Силаева Юлия",
+    ]
+
+
+def test_contact_question_keeps_brand_responsibility_route_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+    route = _organization_chunk(
+        title="Маршрут: ЗАКУПКИ: KRONES / KHS / HEUFT",
+        doc_type="responsibility_route",
+        text="По вопросам закупок KRONES обращаться к Карачурину Денису. Телефон: +7 910 000-00-00.",
+        final_score=250.0,
+        metadata={
+            "knowledge_domain": "organization_structure",
+            "source_file": "bvr_company_structure_instruction_v2 (2).txt",
+            "record_key": "responsibility_route:zakupki_krones_khs_heuft:2025-12-17",
+            "topic": "закупки KRONES",
+        },
+    )
+    unit = _organization_chunk(
+        title="Отделение 4А — Закупки",
+        doc_type="organization_unit",
+        text="Отделение 4А — Закупки. Руководитель: Силаева Юлия.",
+        final_score=300.0,
+        metadata={
+            "knowledge_domain": "organization_structure",
+            "source_file": "bvr_company_structure_instruction_v2 (2).txt",
+            "record_key": "organization_unit:division_4a:2025-12-17",
+            "head_name": "Силаева Юлия",
+        },
+    )
+    generator = RagAnswerGenerator(
+        retriever=FakeRetriever([unit, route]),
+        llm_client=FakeClient("ok"),
+        query_analyzer=FakeQueryAnalyzer(_roles_responsibility_plan()),
+    )
+
+    result = generator.answer("К кому обратиться по закупкам KRONES?")
+
+    assert result.sources[0].title == "Маршрут: ЗАКУПКИ: KRONES / KHS / HEUFT"
+
+
+def test_legacy_org_chart_source_still_handles_org_chart_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+    old_pdf = _organization_chunk(
+        title="Регламент по использованию оргсхемы",
+        doc_type="org_structure",
+        source="data/raw_docs/Регламент по использованию оргсхемы.pdf",
+        text="Оргсхема нужна для описания организующей схемы и правил использования оргсхемы.",
+        final_score=360.0,
+        metadata={"source_file": "Регламент по использованию оргсхемы.pdf"},
+    )
+    structured_overview = _organization_chunk(
+        title="Оргструктура Serviceline",
+        doc_type="organization_overview",
+        text="Компания Serviceline включает основные отделения.",
+        final_score=220.0,
+        metadata={
+            "knowledge_domain": "organization_structure",
+            "source_file": "bvr_company_structure_instruction_v2 (2).txt",
+            "record_key": "organization_overview:serviceline:2025-12-17",
+        },
+    )
+    generator = RagAnswerGenerator(
+        retriever=FakeRetriever([old_pdf, structured_overview]),
+        llm_client=FakeClient("ok"),
+        query_analyzer=FakeQueryAnalyzer(_org_structure_plan()),
+    )
+
+    result = generator.answer("Что такое оргсхема и для чего она нужна?")
+
+    assert result.sources[0].title == "Регламент по использованию оргсхемы"
+
+
+def test_query_plan_diagnostics_contains_runtime_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+    generator = RagAnswerGenerator(
+        retriever=FakeRetriever([]),
+        llm_client=FakeClient("unused"),
+        query_analyzer=FakeQueryAnalyzer(_org_structure_plan()),
+    )
+
+    result = generator.answer("какие отделы есть в компании?")
+
+    assert result.query_plan == {
+        "enabled": True,
+        "intent": "org_structure",
+        "answer_type": "list",
+        "normalized_question": "Какие подразделения есть в организационной структуре компании?",
+        "query_expansions": [
+            "оргсхема компании",
+            "организационная структура компании",
+        ],
+        "preferred_sources": ["2026-03-03_Оргсхема _ Компании"],
+        "confidence": 0.9,
+    }
+
+
+@pytest.mark.parametrize(
+    ("question", "plan_name", "expected_intent"),
+    [
+        ("какие отделы есть в компании?", "org_structure", "org_structure"),
+        ("чем занимается компания?", "company_identity", "company_identity"),
+    ],
+)
+def test_enabled_query_analyzer_exposes_expected_intents_in_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    question: str,
+    plan_name: str,
+    expected_intent: str,
+) -> None:
+    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+    plan = (
+        _org_structure_plan()
+        if plan_name == "org_structure"
+        else _company_identity_plan()
+    )
+    generator = RagAnswerGenerator(
+        retriever=FakeRetriever([]),
+        llm_client=FakeClient("unused"),
+        query_analyzer=FakeQueryAnalyzer(plan),
+    )
+
+    result = generator.answer(question)
+
+    assert result.query_plan is not None
+    assert result.query_plan["intent"] == expected_intent
+
+
+def test_one_c_query_plan_does_not_use_semantic_sources_as_answer_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+    semantic_noise = _chunk_with(
+        title="ИП-0005 Распоряжения",
+        section="Статусы распоряжений",
+        text="В тексте случайно встречается статус заказа, но это не поиск в 1С.",
+        final_score=250.0,
+    )
+    client = FakeClient("unused")
+    generator = RagAnswerGenerator(
+        retriever=FakeRetriever([semantic_noise]),
+        llm_client=client,
+        query_analyzer=FakeQueryAnalyzer(_one_c_operational_lookup_plan()),
+    )
+
+    result = generator.answer("какой статус заказа")
+
+    assert result.query_plan is not None
+    assert result.query_plan["intent"] == "one_c_operational_lookup"
+    assert result.response_kind == "no_answer"
+    assert result.sources == []
+    assert result.chunks_used == 0
+    assert client.messages == []
 
 
 def test_answer_generator_uses_retriever_prompt_and_sources() -> None:
@@ -656,12 +973,93 @@ def _org_structure_plan() -> QueryPlan:
     )
 
 
+def _company_identity_plan() -> QueryPlan:
+    return QueryPlan(
+        intent="company_identity",
+        normalized_question="Чем занимается компания Serviceline?",
+        query_expansions=[
+            "цели компании",
+            "замыслы компании",
+            "ЦКП Serviceline",
+        ],
+        preferred_sources=[
+            "ИП-0002 Цели и замыслы компании Serviceline",
+            "ИП-0003 ЦКП SERVICELINE",
+        ],
+        answer_type="definition",
+        needs_clarification=False,
+        clarification_question=None,
+        confidence=0.85,
+        notes="test plan",
+    )
+
+
+def _one_c_operational_lookup_plan() -> QueryPlan:
+    return QueryPlan(
+        intent="one_c_operational_lookup",
+        normalized_question="Какой статус заказа в 1С?",
+        query_expansions=[
+            "операционный запрос 1С",
+            "статус заказа",
+        ],
+        preferred_sources=[],
+        answer_type="partial_answer",
+        needs_clarification=False,
+        clarification_question=None,
+        confidence=0.8,
+        notes="test plan",
+    )
+
+
+def _roles_responsibility_plan() -> QueryPlan:
+    return QueryPlan(
+        intent="roles_responsibility",
+        normalized_question="Кто отвечает за закупки?",
+        query_expansions=["руководитель закупок"],
+        preferred_sources=[],
+        answer_type="definition",
+        needs_clarification=False,
+        clarification_question=None,
+        confidence=0.9,
+        notes="test plan",
+    )
+
+
 def _chunk() -> RetrievedChunk:
     return _chunk_with(
         title="Тестовый документ",
         section="Тестовый раздел",
         text="Тестовый текст для prompt builder.",
         final_score=50.0,
+    )
+
+
+def _organization_chunk(
+    *,
+    title: str,
+    doc_type: str,
+    text: str,
+    final_score: float,
+    metadata: dict[str, object],
+    source: str = "data/raw_docs/bvr_company_structure_instruction_v2 (2).txt",
+    section: str = "Раздел оргструктуры",
+) -> RetrievedChunk:
+    return RetrievedChunk(
+        chunk_id=abs(hash((title, doc_type))) % 100000,
+        title=title,
+        source=source,
+        section=section,
+        page=None,
+        text=text,
+        score=1.0,
+        metadata={**metadata, "doc_type": doc_type},
+        doc_type=doc_type,
+        base_score=1.0,
+        rerank_score=2.0,
+        final_score=final_score,
+        matched_terms=[],
+        matched_excerpt=text,
+        selection_reasons=["test"],
     )
 
 
