@@ -117,6 +117,46 @@ def test_delete_chunk_removes_record_from_search(tmp_path):
     assert store.search_fts("deletable", namespace="semantic") == []
 
 
+def test_delete_chunks_by_metadata_deletes_only_matching_namespace(tmp_path):
+    store = make_store(tmp_path)
+    store.ensure_schema()
+    matching = store.add_chunk(
+        namespace="semantic",
+        text="organization matching chunk",
+        metadata={"knowledge_domain": "organization_structure", "source_version": "2025-12-17"},
+    )
+    store.add_chunk(
+        namespace="semantic",
+        text="organization other version chunk",
+        metadata={"knowledge_domain": "organization_structure", "source_version": "2026-01-01"},
+    )
+    store.add_chunk(
+        namespace="episodic",
+        text="organization matching episodic chunk",
+        metadata={"knowledge_domain": "organization_structure", "source_version": "2025-12-17"},
+    )
+
+    deleted = store.delete_chunks_by_metadata(
+        namespace="semantic",
+        metadata_filters={"knowledge_domain": "organization_structure", "source_version": "2025-12-17"},
+    )
+
+    assert deleted == 1
+    assert store.delete_chunk(matching) is False
+    assert store.search_fts("other", namespace="semantic")
+    assert store.search_fts("episodic", namespace="episodic")
+
+
+def test_search_fts_accepts_punctuated_user_question(tmp_path):
+    store = make_store(tmp_path)
+    store.ensure_schema()
+    store.add_chunk(namespace="semantic", text="Кто отвечает за склад и какой у него номер")
+
+    results = store.search_fts("Кто отвечает за склад и какой у него номер?", namespace="semantic")
+
+    assert len(results) == 1
+
+
 def test_save_experience_stores_episodic_proposal_experience(tmp_path):
     store = make_store(tmp_path)
     store.ensure_schema()

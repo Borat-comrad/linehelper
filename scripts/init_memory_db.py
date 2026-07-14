@@ -1,4 +1,3 @@
-"""Create the local SQLite database for LineHelper Memory Store."""
 
 from __future__ import annotations
 

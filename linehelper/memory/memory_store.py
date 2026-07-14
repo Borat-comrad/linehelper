@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -57,6 +58,12 @@ def _metadata_from_json(metadata_json: str | None) -> dict[str, Any]:
         return value
 
     return {}
+
+
+def _prepare_fts_query(query: str) -> str:
+    """Convert a user query into a conservative FTS5 MATCH expression."""
+    tokens = re.findall(r"[0-9A-Za-zА-Яа-яЁё]+", query)
+    return " ".join(tokens)
 
 
 class MemoryStore:
@@ -218,7 +225,11 @@ class MemoryStore:
             WHERE memory_chunks_fts MATCH ?
         """
 
-        params: list[Any] = [query.strip()]
+        fts_query = _prepare_fts_query(query)
+        if not fts_query:
+            return []
+
+        params: list[Any] = [fts_query]
 
         if namespace is not None:
             sql += " AND memory_chunks.namespace = ?"
@@ -242,6 +253,44 @@ class MemoryStore:
             connection.commit()
 
             return cursor.rowcount > 0
+
+    def delete_chunks_by_metadata(
+        self,
+        *,
+        namespace: str,
+        metadata_filters: dict[str, Any],
+    ) -> int:
+        """Delete chunks in one namespace whose metadata contains all filters."""
+        _validate_namespace(namespace)
+        if not metadata_filters:
+            raise ValueError("metadata_filters must not be empty")
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, metadata_json
+                FROM memory_chunks
+                WHERE namespace = ?
+                """,
+                (namespace,),
+            ).fetchall()
+
+            chunk_ids: list[int] = []
+            for row in rows:
+                metadata = _metadata_from_json(row["metadata_json"])
+                if all(metadata.get(key) == value for key, value in metadata_filters.items()):
+                    chunk_ids.append(int(row["id"]))
+
+            if not chunk_ids:
+                return 0
+
+            cursor = connection.executemany(
+                "DELETE FROM memory_chunks WHERE id = ?",
+                [(chunk_id,) for chunk_id in chunk_ids],
+            )
+            connection.commit()
+
+            return cursor.rowcount
 
     def expire_old_episodes(self) -> int:
         """Delete expired episodic memory chunks and return deleted count."""
