@@ -329,7 +329,7 @@ class RagAnswerGenerator:
             raise ValueError("question must not be empty")
 
         started_at = time.monotonic()
-        query_analysis = self._analyze_query_if_enabled(clean_question)
+        query_analysis = self._analyze_query(clean_question)
         query_plan = query_analysis.plan
         query_plan_diagnostics = query_analysis.diagnostics
 
@@ -490,10 +490,7 @@ class RagAnswerGenerator:
             )
         return chunks
 
-    def _analyze_query_if_enabled(self, question: str) -> QueryAnalysisResult:
-        if not _query_analyzer_enabled():
-            return QueryAnalysisResult(plan=None, diagnostics={"enabled": False})
-
+    def _analyze_query(self, question: str) -> QueryAnalysisResult:
         if self.query_analyzer is None:
             try:
                 from linehelper.rag.query_analyzer import QueryAnalyzer
@@ -514,6 +511,11 @@ class RagAnswerGenerator:
             )
 
         diagnostics = _query_plan_diagnostics(query_plan)
+        analyzer_error = getattr(self.query_analyzer, "last_error", None)
+        if analyzer_error:
+            diagnostics["fallback_used"] = True
+            diagnostics["fallback_reason"] = "query_analyzer_error"
+            diagnostics["error"] = analyzer_error
         if not _query_plan_is_usable(query_plan):
             diagnostics["fallback_used"] = True
             diagnostics["fallback_reason"] = "empty_or_unknown_query_plan"
@@ -554,11 +556,6 @@ class RagAnswerGenerator:
             key=_chunk_score,
             reverse=True,
         )
-
-
-def _query_analyzer_enabled() -> bool:
-    return os.getenv("LINEHELPER_USE_QUERY_ANALYZER") == "1"
-
 
 def _query_plan_diagnostics(query_plan: QueryPlan) -> dict[str, Any]:
     return {

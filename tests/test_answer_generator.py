@@ -4,8 +4,20 @@ import pytest
 
 from linehelper.llm.answer_generator import RagAnswerError, RagAnswerGenerator
 from linehelper.llm.ollama_client import OllamaEmptyResponseError
-from linehelper.rag.query_analyzer import QueryPlan
+from linehelper.rag.query_analyzer import QueryPlan, fallback_query_plan
 from linehelper.rag.retriever import RetrievedChunk
+
+
+@pytest.fixture(autouse=True)
+def _use_rule_based_default_query_analyzer(monkeypatch: pytest.MonkeyPatch) -> None:
+    class RuleBasedQueryAnalyzer:
+        def analyze(self, question: str) -> QueryPlan:
+            return fallback_query_plan(question)
+
+    monkeypatch.setattr(
+        "linehelper.rag.query_analyzer.QueryAnalyzer",
+        RuleBasedQueryAnalyzer,
+    )
 
 
 def test_empty_question_is_rejected() -> None:
@@ -18,29 +30,7 @@ def test_empty_question_is_rejected() -> None:
         generator.answer("   ")
 
 
-def test_query_analyzer_is_not_called_without_feature_flag(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("LINEHELPER_USE_QUERY_ANALYZER", raising=False)
-    analyzer = FakeQueryAnalyzer(_org_structure_plan())
-    retriever = FakeRetriever([])
-    generator = RagAnswerGenerator(
-        retriever=retriever,
-        llm_client=FakeClient("unused"),
-        query_analyzer=analyzer,
-    )
-
-    result = generator.answer("какие отделы есть в компании?")
-
-    assert analyzer.calls == []
-    assert retriever.calls == [("какие отделы есть в компании?", 5, 30)]
-    assert result.query_plan == {"enabled": False}
-
-
-def test_query_analyzer_is_called_with_feature_flag(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+def test_query_analyzer_is_called_by_default() -> None:
     analyzer = FakeQueryAnalyzer(_org_structure_plan())
     retriever = FakeRetriever([])
     generator = RagAnswerGenerator(
@@ -57,10 +47,30 @@ def test_query_analyzer_is_called_with_feature_flag(
     assert result.query_plan["intent"] == "org_structure"
 
 
-def test_query_analyzer_error_falls_back_to_old_retrieval_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+def test_query_analyzer_expands_retrieval_by_default() -> None:
+    analyzer = FakeQueryAnalyzer(_org_structure_plan())
+    retriever = FakeRetriever([])
+    generator = RagAnswerGenerator(
+        retriever=retriever,
+        llm_client=FakeClient("unused"),
+        query_analyzer=analyzer,
+    )
+
+    result = generator.answer("какие отделы есть в компании?")
+
+    assert analyzer.calls == ["какие отделы есть в компании?"]
+    assert [call[0] for call in retriever.calls] == [
+        "какие отделы есть в компании?",
+        "Какие подразделения есть в организационной структуре компании?",
+        "оргсхема компании",
+        "организационная структура компании",
+    ]
+    assert result.query_plan is not None
+    assert result.query_plan["enabled"] is True
+    assert result.query_plan["intent"] == "org_structure"
+
+
+def test_query_analyzer_error_falls_back_to_plain_retrieval_path() -> None:
     retriever = FakeRetriever([])
     generator = RagAnswerGenerator(
         retriever=retriever,
@@ -78,10 +88,25 @@ def test_query_analyzer_error_falls_back_to_old_retrieval_path(
     assert result.response_kind == "no_answer"
 
 
-def test_query_analyzer_expands_org_structure_retrieval_queries(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+def test_query_analyzer_internal_fallback_is_reported_in_diagnostics() -> None:
+    retriever = FakeRetriever([])
+    generator = RagAnswerGenerator(
+        retriever=retriever,
+        llm_client=FakeClient("unused"),
+        query_analyzer=FallbackQueryAnalyzer(_org_structure_plan()),
+    )
+
+    result = generator.answer("какие отделы есть в компании?")
+
+    assert result.query_plan is not None
+    assert result.query_plan["enabled"] is True
+    assert result.query_plan["intent"] == "org_structure"
+    assert result.query_plan["fallback_used"] is True
+    assert result.query_plan["fallback_reason"] == "query_analyzer_error"
+    assert "broken analyzer json" in result.query_plan["error"]
+
+
+def test_query_analyzer_expands_org_structure_retrieval_queries() -> None:
     retriever = FakeRetriever([])
     generator = RagAnswerGenerator(
         retriever=retriever,
@@ -98,10 +123,7 @@ def test_query_analyzer_expands_org_structure_retrieval_queries(
     assert "организационная структура компании" in retrieval_queries
 
 
-def test_query_analyzer_keeps_unit_identifier_in_expanded_queries(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+def test_query_analyzer_keeps_unit_identifier_in_expanded_queries() -> None:
     retriever = FakeRetriever([])
     generator = RagAnswerGenerator(
         retriever=retriever,
@@ -116,10 +138,7 @@ def test_query_analyzer_keeps_unit_identifier_in_expanded_queries(
     assert "организационная структура компании 4А" in retrieval_queries
 
 
-def test_preferred_source_is_not_hard_filter_for_exact_organization_unit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+def test_preferred_source_is_not_hard_filter_for_exact_organization_unit() -> None:
     organization_unit = _organization_chunk(
         title="Отделение 4А — Закупки",
         doc_type="organization_unit",
@@ -154,10 +173,7 @@ def test_preferred_source_is_not_hard_filter_for_exact_organization_unit(
     assert "Отделение 4А — Закупки" in generator.llm_client.messages[-1]["content"]
 
 
-def test_leadership_context_keeps_employee_contact_after_exact_unit_boost(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+def test_leadership_context_keeps_employee_contact_after_exact_unit_boost() -> None:
     organization_unit = _organization_chunk(
         title="Отделение 4А — Закупки",
         doc_type="organization_unit",
@@ -201,10 +217,7 @@ def test_leadership_context_keeps_employee_contact_after_exact_unit_boost(
     assert "+7 961 105-03-08" in generator.llm_client.messages[-1]["content"]
 
 
-def test_leadership_question_prefers_unit_and_employee_over_brand_route(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+def test_leadership_question_prefers_unit_and_employee_over_brand_route() -> None:
     route = _organization_chunk(
         title="Маршрут: ЗАКУПКИ: KRONES / KHS / HEUFT",
         doc_type="responsibility_route",
@@ -254,10 +267,7 @@ def test_leadership_question_prefers_unit_and_employee_over_brand_route(
     ]
 
 
-def test_contact_question_keeps_brand_responsibility_route_first(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+def test_contact_question_keeps_brand_responsibility_route_first() -> None:
     route = _organization_chunk(
         title="Маршрут: ЗАКУПКИ: KRONES / KHS / HEUFT",
         doc_type="responsibility_route",
@@ -293,10 +303,7 @@ def test_contact_question_keeps_brand_responsibility_route_first(
     assert result.sources[0].title == "Маршрут: ЗАКУПКИ: KRONES / KHS / HEUFT"
 
 
-def test_legacy_org_chart_source_still_handles_org_chart_rules(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+def test_legacy_org_chart_source_still_handles_org_chart_rules() -> None:
     old_pdf = _organization_chunk(
         title="Регламент по использованию оргсхемы",
         doc_type="org_structure",
@@ -327,10 +334,7 @@ def test_legacy_org_chart_source_still_handles_org_chart_rules(
     assert result.sources[0].title == "Регламент по использованию оргсхемы"
 
 
-def test_query_plan_diagnostics_contains_runtime_metadata(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+def test_query_plan_diagnostics_contains_runtime_metadata() -> None:
     generator = RagAnswerGenerator(
         retriever=FakeRetriever([]),
         llm_client=FakeClient("unused"),
@@ -360,13 +364,11 @@ def test_query_plan_diagnostics_contains_runtime_metadata(
         ("чем занимается компания?", "company_identity", "company_identity"),
     ],
 )
-def test_enabled_query_analyzer_exposes_expected_intents_in_diagnostics(
-    monkeypatch: pytest.MonkeyPatch,
+def test_query_analyzer_exposes_expected_intents_in_diagnostics(
     question: str,
     plan_name: str,
     expected_intent: str,
 ) -> None:
-    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
     plan = (
         _org_structure_plan()
         if plan_name == "org_structure"
@@ -384,10 +386,7 @@ def test_enabled_query_analyzer_exposes_expected_intents_in_diagnostics(
     assert result.query_plan["intent"] == expected_intent
 
 
-def test_one_c_query_plan_does_not_use_semantic_sources_as_answer_sources(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("LINEHELPER_USE_QUERY_ANALYZER", "1")
+def test_one_c_query_plan_does_not_use_semantic_sources_as_answer_sources() -> None:
     semantic_noise = _chunk_with(
         title="ИП-0005 Распоряжения",
         section="Статусы распоряжений",
@@ -954,6 +953,16 @@ class FakeQueryAnalyzer:
 class ErrorQueryAnalyzer:
     def analyze(self, question: str) -> QueryPlan:
         raise RuntimeError("query analyzer failed")
+
+
+class FallbackQueryAnalyzer:
+    last_error = "broken analyzer json"
+
+    def __init__(self, plan: QueryPlan) -> None:
+        self.plan = plan
+
+    def analyze(self, question: str) -> QueryPlan:
+        return self.plan
 
 
 def _org_structure_plan() -> QueryPlan:

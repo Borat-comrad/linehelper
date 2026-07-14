@@ -107,16 +107,15 @@ UI разделяет:
 Ограничение: это пока прозрачные эвристические правила, а не полноценный intent
 classifier. Их нужно расширять по мере появления новых ручных failure cases.
 
-## LLM Query Analyzer: experimental stage
+## LLM Query Analyzer: runtime stage
 
-Добавлен первый безопасный этап будущей архитектуры: `linehelper/rag/query_analyzer.py`.
+Добавлен штатный этап основного RAG-контура: `linehelper/rag/query_analyzer.py`.
 Он использует локальную Ollama/LLM, чтобы преобразовать живой пользовательский вопрос в
-структурированный `QueryPlan` для диагностики, тестов и будущего подключения к retriever.
+структурированный `QueryPlan` для диагностики, routing/evidence и retrieval.
 
-Важно: Query Analyzer пока не подключен к боевому RAG-ответу. Основной ответ пользователя
-продолжает работать по старой схеме:
+Основной runtime path:
 
-`user question -> rule-based routing -> retriever -> no-answer gate -> prompt_builder -> Ollama answer`
+`user question -> Query Analyzer -> QueryPlan validation -> retrieval -> rerank -> evidence gate -> context selection -> answer LLM`
 
 `QueryPlan` содержит:
 
@@ -129,7 +128,7 @@ classifier. Их нужно расширять по мере появления 
 - `needs_clarification` и `clarification_question` - флаг и текст уточнения;
 - `confidence` и `notes` - диагностическая уверенность и пояснение.
 
-Будущий целевой пайплайн:
+Целевой пайплайн:
 
 `user question -> Query Analyzer -> QueryPlan -> Retriever -> Evidence Gate -> Answer LLM`
 
@@ -139,14 +138,14 @@ classifier. Их нужно расширять по мере появления 
 - возможный битый JSON от локальной модели;
 - ошибка intent или слишком уверенная нормализация вопроса.
 
-Меры безопасности текущего этапа:
+Меры безопасности:
 
 - strict schema с фиксированными `intent` и `answer_type`;
 - rule-based fallback при недоступной Ollama или невалидном JSON;
 - Python validation и нормализация полей;
 - `KNOWN_SOURCE_TITLES` как общий allowlist известных source titles;
 - `INTENT_SOURCE_COMPATIBILITY` как отдельная карта совместимости источников с intent;
-- старый pipeline остается неизменным и не зависит от Query Analyzer.
+- plain retrieval fallback сохраняется при ошибке анализатора или непригодном `QueryPlan`.
 
 Одного `KNOWN_SOURCE_TITLES` недостаточно: источник может быть реальным, но семантически
 неподходящим для intent. Например, `ИП-0004 Структура ЗРС` является известным источником,
@@ -196,21 +195,32 @@ Exploratory smoke `scripts/smoke_test_query_analyzer_exploratory.py` прого�
 нарушениях, например `CKP_BAD_EXPANSION`, `OFF_TOPIC_WITH_SOURCE`, источнике вне allowlist
 или crash.
 
-Query Analyzer остается экспериментальным диагностическим слоем и все еще не подключен к
-боевому RAG-ответу.
+## Query Analyzer in runtime mode
 
-Query Analyzer can be enabled in the production RAG path only with the feature flag:
+Query Analyzer включен в production RAG path по умолчанию. Для обычного запуска нужен только
+выбор модели анализатора, если модель по умолчанию не подходит:
 
 ```powershell
-$env:LINEHELPER_USE_QUERY_ANALYZER="1"
+$env:OLLAMA_ANALYZER_MODEL="qwen2.5:3b"
 ```
 
-Without this flag, the MVP uses the old path exactly as before. With the flag enabled,
-`RagAnswerGenerator` calls `QueryAnalyzer.analyze()` before retrieval and uses
-`normalized_question` plus `query_expansions` as extra retrieval queries. `preferred_sources`
-are used only as a soft boost/hint, never as the only allowed evidence. The Python evidence
-gate still decides whether retrieved chunks are sufficient, so the analyzer cannot force a
-final answer by itself. Query plan diagnostics are attached to `RagAnswer.query_plan`.
+`user question -> QueryAnalyzer -> QueryPlan -> retrieval -> evidence gate -> answer LLM`
+
+`RagAnswerGenerator` вызывает `QueryAnalyzer.analyze()` перед retrieval и использует исходный
+вопрос, `normalized_question` и `query_expansions` как поисковые запросы. Исходный вопрос не
+удаляется из поиска. `preferred_sources` используются только как soft boost/приоритет, а не как
+единственный разрешенный источник. `intent` и `answer_type` попадают в диагностику и могут
+помогать routing/evidence, но Python evidence gate остается обязательным и решает, достаточно ли
+найденных chunks для ответа.
+
+Если Query Analyzer падает или возвращает пустой/unknown план, runtime не падает: используется
+старый retrieval path, а `RagAnswer.query_plan` содержит `enabled=true`, `fallback_used=true` и
+ошибку или причину fallback.
+
+Query Analyzer пока экспериментальный. Он не выполняет 1С-запросы и не подключается к 1С:
+intent `one_c_operational_lookup` только классифицирует будущий тип операционных запросов
+про цены, остатки, статус заказа, счета, контрагентов, отгрузки и номенклатуру. Такие вопросы не
+должны получать фальшивый ответ из semantic memory.
 
 ## Ollama
 

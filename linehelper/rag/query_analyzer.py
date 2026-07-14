@@ -1,4 +1,4 @@
-"""Experimental LLM query analyzer that returns a structured search plan."""
+"""LLM query analyzer that returns a structured search plan."""
 
 from __future__ import annotations
 
@@ -160,7 +160,7 @@ class AnalyzerChatClient(Protocol):
 
 
 class QueryAnalyzer:
-    """Build a diagnostic QueryPlan without changing the production RAG flow."""
+    """Build a validated QueryPlan for the runtime RAG flow."""
 
     def __init__(
         self,
