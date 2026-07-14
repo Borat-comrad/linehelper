@@ -698,7 +698,7 @@ def _boost_preferred_source_chunks(
             boosted_chunks.append(
                 replace(
                     chunk,
-                    final_score=score + 75.0,
+                    final_score=score + 20.0,
                     selection_reasons=[
                         *(chunk.selection_reasons or []),
                         "query analyzer preferred source boost",

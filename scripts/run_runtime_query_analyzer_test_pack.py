@@ -208,9 +208,9 @@ class TimedQueryAnalyzer:
             self.last_elapsed_seconds = round(time.monotonic() - started_at, 3)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     _configure_stdout()
-    args = _parse_args()
+    args = _parse_args(argv)
     _set_default_runtime_env()
 
     pack_path = _resolve_path(args.pack)
@@ -315,7 +315,7 @@ def main() -> int:
     return 0
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run LineHelper runtime Query Analyzer test pack.",
     )
@@ -326,7 +326,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--sleep", type=float, default=0.0)
     parser.add_argument("--debug", action="store_true")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def _set_default_runtime_env() -> None:

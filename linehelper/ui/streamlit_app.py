@@ -249,6 +249,7 @@ def _render_result_details(result, settings: UiSettings) -> None:
                 "context_limit": result.context_limit,
                 "context_score_ratio": result.context_score_ratio,
                 "response_kind": result.response_kind,
+                "query_plan": result.query_plan,
             }
         )
         if result.diagnostic_candidates:
