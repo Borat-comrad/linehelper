@@ -3,6 +3,7 @@ venv/
 __pycache__/
 **/__pycache__/
 *.pyc
+*.egg-info/
 .pytest_cache/
 pytest-tmp/
 tmp/
@@ -32,6 +33,8 @@ data/raw_docs/*
 !data/raw_docs/.gitkeep
 data/semantic_index/*
 !data/semantic_index/.gitkeep
+data/test_runs/
+data/runtime/
 data/onec_mock/*
 !data/onec_mock/.gitkeep
 

@@ -64,6 +64,107 @@ requirements.txt
 README.md
 ```
 
+## Organizational Knowledge Contour
+
+LineHelper has a deterministic import contour for the Serviceline organization
+structure. It parses the TXT source without LLM extraction and writes separate
+semantic memory chunks for organization units, employees, responsibility routes,
+vacancies, inactive management bodies, and role combinations.
+
+Source file:
+
+```text
+data/raw_docs/bvr_company_structure_instruction_v2 (2).txt
+```
+
+Source version:
+
+```text
+2025-12-17
+```
+
+Imported entity types:
+
+- `OrganizationUnit`: company, council, division, department, section, sector,
+  group, service, office.
+- `EmployeeRole`: employee name, role, unit, responsibilities, work phone,
+  normalized phone, email, acting/vacant flags.
+- `ResponsibilityRoute`: topic, primary responsible employee, role, unit,
+  phone/email, fallback or higher-level responsible person.
+- `OrganizationStatus`: vacancies, inactive bodies, and role combinations.
+
+Chunking rules:
+
+- one top-level `organization_overview` chunk;
+- one `organization_unit` chunk per parsed unit;
+- one `employee_role` chunk per employee;
+- one `responsibility_route` chunk per contact-matrix route;
+- separate chunks for `organization_vacancy`, `organization_status`, and
+  `role_combination`;
+- the full document is never stored as one large chunk.
+
+Contacts are imported by default. Phones are stored in human format such as
+`+7 XXX XXX-XX-XX` and in metadata as normalized machine values such as
+`+79012981238`. Emails are lowercased when confidently valid. Suspicious
+contacts are preserved only when safe and reported as parser warnings; missing
+contacts are not invented.
+
+Dry-run:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\index_company_structure.py --dry-run --verbose
+```
+
+Working import:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\index_company_structure.py
+```
+
+Explicit source file:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\index_company_structure.py "data\raw_docs\bvr_company_structure_instruction_v2 (2).txt"
+```
+
+Smoke test:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\smoke_test_company_structure.py
+```
+
+Pytest:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest scripts\tests --basetemp .\.venv\pytest-tmp -p no:cacheprovider
+```
+
+Repeated imports are idempotent for the same `source_file` and
+`source_version`: before writing, the importer removes only semantic chunks whose
+metadata matches `knowledge_domain=organization_structure`, the same source
+file, and version `2025-12-17`. It does not touch episodic memory, semantic
+chunks from other documents, other knowledge domains, or other versions.
+
+Agents should use contact data only when the user asks for routing or contact
+details. Structure questions should describe departments without dumping the
+full contact list. If a contact is absent, answer that the responsible employee
+is defined but contact data is not specified in the source. If a position is
+vacant, do not route the user to a fictional executor; say that the position is
+vacant in version `2025-12-17`.
+
+Supported question examples:
+
+- Какие подразделения есть в компании?
+- Из каких отделов состоит отделение логистики?
+- Кто руководит отделением закупок?
+- К кому обратиться по кадровому учёту?
+- Кто отвечает за таможенное оформление?
+- Какой телефон у ответственного за таможню?
+- Кому написать по закупкам IMETA?
+- К кому обратиться по продажам ЭФЕС?
+- Какие должности вакантны?
+- Активен ли исполнительный совет?
+
 ## Установка зависимостей
 
 В Windows PowerShell:
