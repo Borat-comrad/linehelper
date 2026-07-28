@@ -1,0 +1,680 @@
+{
+  "schema_version": "2.0",
+  "description": "Capability-oriented architectural regression cases for the LineHelper RAG v2 contour.",
+  "status_values": [
+    "passed",
+    "failed",
+    "blocked",
+    "not_applicable"
+  ],
+  "cases": [
+    {
+      "id": "T01",
+      "group": "conversation_resolution",
+      "tags": ["core", "conversation", "clarification", "commercial_offer"],
+      "pair_id": "clarification_kp_vs_order",
+      "messages": [
+        {"role": "user", "content": "Как оформить КП?"},
+        {"role": "user", "content": "Коммерческое предложение"}
+      ],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "procedure",
+        "intent": "kp_commercial_offer",
+        "operational_lookup": false,
+        "clarification": false,
+        "resolved_question": "Как оформить коммерческое предложение?",
+        "final_modes": ["partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["repeat_kp_clarification", "invent_missing_instruction"],
+        "turns": [
+          {"turn": 1, "clarification": true, "ambiguity_span": "КП"},
+          {"turn": 2, "clarification": false}
+        ]
+      }
+    },
+    {
+      "id": "T02",
+      "group": "document_flow_coverage",
+      "tags": ["core", "procedure", "coverage"],
+      "messages": [
+        {"role": "user", "content": "Какие правила документооборота действуют?"}
+      ],
+      "expected": {
+        "answerability": "full",
+        "requested_fact_type": "policy_list",
+        "intent": "document_flow",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer"],
+        "required_retrieval": {
+          "sources": ["ИП-0006 Документооборот"],
+          "record_keys": [],
+          "chunk_ids": [71, 72, 73, 74]
+        },
+        "required_context": {
+          "sources": ["ИП-0006 Документооборот"],
+          "record_keys": [],
+          "chunk_ids": [71, 72, 73, 74]
+        },
+        "forbidden_behaviors": ["single_rule_only", "generic_no_answer"]
+      }
+    },
+    {
+      "id": "T03",
+      "group": "equipment_procedure",
+      "tags": ["core", "procedure", "equipment"],
+      "messages": [
+        {"role": "user", "content": "Как получить новое оборудование?"}
+      ],
+      "expected": {
+        "answerability": "full",
+        "requested_fact_type": "procedure",
+        "intent": "equipment_it_request",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer"],
+        "required_retrieval": {
+          "sources": ["2026-19-06 Инструкция Заявка в 1 отд-е (построение) хоз.часть"],
+          "record_keys": [],
+          "chunk_ids": [29]
+        },
+        "required_context": {
+          "sources": ["2026-19-06 Инструкция Заявка в 1 отд-е (построение) хоз.часть"],
+          "record_keys": [],
+          "chunk_ids": [29]
+        },
+        "forbidden_behaviors": ["generic_no_answer", "organization_noise_as_procedure"]
+      }
+    },
+    {
+      "id": "T04",
+      "group": "business_trip_recipient",
+      "tags": ["core", "procedure", "partial_answer"],
+      "pair_id": "business_trip_procedure_recipient_status",
+      "messages": [
+        {"role": "user", "content": "Кому подавать заявление на командировку?"}
+      ],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "named_recipient",
+        "intent": "business_trip",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer"],
+        "required_retrieval": {
+          "sources": ["Инструкция Согласования командировки в Документообороте"],
+          "record_keys": [],
+          "chunk_ids": [47]
+        },
+        "required_context": {
+          "sources": ["Инструкция Согласования командировки в Документообороте"],
+          "record_keys": [],
+          "chunk_ids": [47]
+        },
+        "forbidden_behaviors": ["invent_named_recipient", "generic_no_answer"],
+        "required_answer_concepts": [
+          ["СЗ_Командировка", "командировк"],
+          ["не указан", "не назван", "нет данных"]
+        ]
+      }
+    },
+    {
+      "id": "T05A",
+      "group": "vacation_static",
+      "tags": ["core", "procedure", "vacation"],
+      "messages": [
+        {"role": "user", "content": "Как оформить отпуск и за сколько дней подать заявление?"}
+      ],
+      "expected": {
+        "answerability": "full",
+        "requested_fact_type": "procedure_and_deadline",
+        "intent": "vacation",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer"],
+        "required_retrieval": {
+          "sources": ["Инструкция Отпуск в Документообороте", "2026-05-05 Навигатор команды_ServiceLine"],
+          "record_keys": [],
+          "chunk_ids": [27, 42]
+        },
+        "required_context": {
+          "sources": ["Инструкция Отпуск в Документообороте", "2026-05-05 Навигатор команды_ServiceLine"],
+          "record_keys": [],
+          "chunk_ids": [27, 42]
+        },
+        "forbidden_behaviors": ["route_to_current_status", "generic_no_answer"],
+        "required_answer_concepts": [
+          ["14 календар", "14 дней"],
+          ["отпуск"]
+        ]
+      }
+    },
+    {
+      "id": "T05B",
+      "group": "vacation_operational",
+      "tags": ["core", "operational_boundary", "vacation"],
+      "messages": [
+        {"role": "user", "content": "Когда согласуют моё уже поданное заявление на отпуск?"}
+      ],
+      "expected": {
+        "answerability": "operational",
+        "requested_fact_type": "current_status",
+        "intent": ["one_c_operational_lookup", "vacation"],
+        "operational_lookup": true,
+        "clarification": false,
+        "final_modes": ["partial_answer", "no_answer", "answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["invent_current_status", "invent_approval_date"]
+      }
+    },
+    {
+      "id": "T06",
+      "group": "responsibility_shipping",
+      "tags": ["core", "responsibility", "organization"],
+      "messages": [
+        {"role": "user", "content": "Кто отвечает за отгрузку клиенту?"}
+      ],
+      "expected": {
+        "answerability": "full",
+        "requested_fact_type": "responsible_person",
+        "intent": "roles_responsibility",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer"],
+        "required_retrieval": {
+          "sources": ["bvr_company_structure_instruction_v2 (2).txt"],
+          "record_keys": ["responsibility_route:logistika_i_sklad_dostavka_klientu:2025-12-17"],
+          "chunk_ids": []
+        },
+        "required_context": {
+          "sources": ["bvr_company_structure_instruction_v2 (2).txt"],
+          "record_keys": ["responsibility_route:logistika_i_sklad_dostavka_klientu:2025-12-17"],
+          "chunk_ids": []
+        },
+        "forbidden_behaviors": ["route_to_one_c", "empty_context", "generic_no_answer"],
+        "required_answer_concepts": [["Симонов"]]
+      }
+    },
+    {
+      "id": "T07",
+      "group": "compound_responsibility",
+      "tags": ["core", "responsibility", "compound", "partial_answer"],
+      "messages": [
+        {"role": "user", "content": "Кто отвечает за рабочие места и оборудование?"}
+      ],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "compound_responsibility",
+        "intent": "roles_responsibility",
+        "operational_lookup": false,
+        "clarification": false,
+        "follow_up_clarification_allowed": true,
+        "final_modes": ["answer", "partial_answer"],
+        "required_retrieval": {
+          "sources": ["bvr_company_structure_instruction_v2 (2).txt"],
+          "record_keys": ["employee:shkirenkov_roman:2025-12-17"],
+          "chunk_ids": []
+        },
+        "required_context": {
+          "sources": ["bvr_company_structure_instruction_v2 (2).txt"],
+          "record_keys": ["employee:shkirenkov_roman:2025-12-17"],
+          "chunk_ids": []
+        },
+        "forbidden_behaviors": ["all_equipment_overgeneralization", "unrelated_routes_as_sufficient"],
+        "required_answer_concepts": [["Шкиренков"]]
+      }
+    },
+    {
+      "id": "T08",
+      "group": "responsibility_internal_document_flow",
+      "tags": ["core", "responsibility", "organization", "clarification_negative"],
+      "pair_id": "documents_ambiguous_vs_internal",
+      "messages": [
+        {"role": "user", "content": "Кто отвечает за внутренний документооборот?"}
+      ],
+      "expected": {
+        "answerability": "full",
+        "requested_fact_type": "responsible_person",
+        "intent": "roles_responsibility",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer"],
+        "required_retrieval": {
+          "sources": ["bvr_company_structure_instruction_v2 (2).txt"],
+          "record_keys": [],
+          "chunk_ids": [437, 439]
+        },
+        "required_context": {
+          "sources": ["bvr_company_structure_instruction_v2 (2).txt"],
+          "record_keys": [],
+          "chunk_ids": [437, 439]
+        },
+        "forbidden_behaviors": ["substitute_hr_document_flow", "generic_no_answer"],
+        "required_answer_concepts": [["Шкиренков"], ["Малахов"]],
+        "forbidden_answer_terms": ["Прокошина"]
+      }
+    },
+    {
+      "id": "T09",
+      "group": "order_disposition_rule",
+      "tags": ["core", "procedure", "clarification_negative"],
+      "pair_id": "clarification_kp_vs_order",
+      "messages": [
+        {"role": "user", "content": "Можно ли дать распоряжение устно?"}
+      ],
+      "expected": {
+        "answerability": "full",
+        "requested_fact_type": "normative_rule",
+        "intent": "order_disposition",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer"],
+        "required_retrieval": {
+          "sources": ["ИП-0005 Распоряжения"],
+          "record_keys": [],
+          "chunk_ids": [67]
+        },
+        "required_context": {
+          "sources": ["ИП-0005 Распоряжения"],
+          "record_keys": [],
+          "chunk_ids": [67]
+        },
+        "forbidden_behaviors": ["kp_ckp_clarification", "generic_no_answer"],
+        "required_answer_concepts": [["письмен"], ["устн", "первой возможност"]]
+      }
+    },
+    {
+      "id": "PI01",
+      "group": "paired_intent",
+      "tags": ["paired", "responsibility"],
+      "pair_id": "order_owner_vs_status",
+      "messages": [{"role": "user", "content": "Кто отвечает за заказ?"}],
+      "expected": {
+        "answerability": "clarification",
+        "requested_fact_type": "responsible_person",
+        "intent": ["roles_responsibility", "unknown"],
+        "operational_lookup": false,
+        "clarification": true,
+        "final_modes": ["clarification"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["route_to_one_c", "random_organization_answer"]
+      }
+    },
+    {
+      "id": "PI02",
+      "group": "paired_intent",
+      "tags": ["paired", "operational_boundary"],
+      "pair_id": "order_owner_vs_status",
+      "messages": [{"role": "user", "content": "Какой статус заказа №12345?"}],
+      "expected": {
+        "answerability": "operational",
+        "requested_fact_type": "current_status",
+        "intent": "one_c_operational_lookup",
+        "operational_lookup": true,
+        "clarification": false,
+        "final_modes": ["partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["invent_current_status"]
+      }
+    },
+    {
+      "id": "PI03",
+      "group": "paired_intent",
+      "tags": ["paired", "responsibility"],
+      "pair_id": "shipping_owner_vs_status",
+      "messages": [{"role": "user", "content": "Кто отвечает за отгрузку?"}],
+      "expected": {
+        "answerability": "clarification",
+        "requested_fact_type": "responsible_person",
+        "intent": "roles_responsibility",
+        "operational_lookup": false,
+        "clarification": true,
+        "final_modes": ["clarification", "partial_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["route_to_one_c"]
+      }
+    },
+    {
+      "id": "PI04",
+      "group": "paired_intent",
+      "tags": ["paired", "operational_boundary"],
+      "pair_id": "shipping_owner_vs_status",
+      "messages": [{"role": "user", "content": "Отгружен ли уже заказ?"}],
+      "expected": {
+        "answerability": "operational",
+        "requested_fact_type": "current_status",
+        "intent": "one_c_operational_lookup",
+        "operational_lookup": true,
+        "clarification": false,
+        "final_modes": ["partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["invent_current_status"]
+      }
+    },
+    {
+      "id": "PI05",
+      "group": "paired_intent",
+      "tags": ["paired", "responsibility"],
+      "pair_id": "warehouse_owner_vs_inventory",
+      "messages": [{"role": "user", "content": "Кто ведёт склад?"}],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "responsible_person",
+        "intent": "roles_responsibility",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer"],
+        "required_retrieval": {"sources": ["bvr_company_structure_instruction_v2 (2).txt"], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": ["bvr_company_structure_instruction_v2 (2).txt"], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["route_to_one_c"]
+      }
+    },
+    {
+      "id": "PI06",
+      "group": "paired_intent",
+      "tags": ["paired", "operational_boundary"],
+      "pair_id": "warehouse_owner_vs_inventory",
+      "messages": [{"role": "user", "content": "Что сейчас есть на складе?"}],
+      "expected": {
+        "answerability": "operational",
+        "requested_fact_type": "inventory_status",
+        "intent": "one_c_operational_lookup",
+        "operational_lookup": true,
+        "clarification": false,
+        "final_modes": ["partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["invent_inventory"]
+      }
+    },
+    {
+      "id": "PI07",
+      "group": "paired_intent",
+      "tags": ["paired", "responsibility"],
+      "pair_id": "payments_owner_vs_paid",
+      "messages": [{"role": "user", "content": "Кто занимается оплатами?"}],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "responsible_person",
+        "intent": "roles_responsibility",
+        "operational_lookup": false,
+        "clarification": true,
+        "final_modes": ["clarification", "partial_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["route_to_one_c", "random_organization_answer"]
+      }
+    },
+    {
+      "id": "PI08",
+      "group": "paired_intent",
+      "tags": ["paired", "operational_boundary"],
+      "pair_id": "payments_owner_vs_paid",
+      "messages": [{"role": "user", "content": "Оплачен ли счёт №123?"}],
+      "expected": {
+        "answerability": "operational",
+        "requested_fact_type": "payment_status",
+        "intent": "one_c_operational_lookup",
+        "operational_lookup": true,
+        "clarification": false,
+        "final_modes": ["partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["invent_payment_status"]
+      }
+    },
+    {
+      "id": "CL01",
+      "group": "clarification_boundary",
+      "tags": ["clarification", "conversation_seed"],
+      "pair_id": "documents_ambiguous_vs_internal",
+      "messages": [{"role": "user", "content": "Кому отдать документы?"}],
+      "expected": {
+        "answerability": "clarification",
+        "requested_fact_type": "named_recipient",
+        "intent": ["unknown", "document_flow"],
+        "operational_lookup": false,
+        "clarification": true,
+        "final_modes": ["clarification"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["random_organization_answer"]
+      }
+    },
+    {
+      "id": "CL02",
+      "group": "clarification_boundary",
+      "tags": ["clarification", "conversation_seed"],
+      "messages": [{"role": "user", "content": "Кто этим занимается?"}],
+      "expected": {
+        "answerability": "clarification",
+        "requested_fact_type": "responsible_person",
+        "intent": "unknown",
+        "operational_lookup": false,
+        "clarification": true,
+        "final_modes": ["clarification"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["random_organization_answer"]
+      }
+    },
+    {
+      "id": "PR01",
+      "group": "procedure_recipient_status",
+      "tags": ["procedure", "business_trip"],
+      "pair_id": "business_trip_procedure_recipient_status",
+      "messages": [{"role": "user", "content": "Как оформить командировку?"}],
+      "expected": {
+        "answerability": "full",
+        "requested_fact_type": "procedure",
+        "intent": "business_trip",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer"],
+        "required_retrieval": {"sources": ["Инструкция Согласования командировки в Документообороте"], "record_keys": [], "chunk_ids": [47]},
+        "required_context": {"sources": ["Инструкция Согласования командировки в Документообороте"], "record_keys": [], "chunk_ids": [47]},
+        "forbidden_behaviors": ["generic_no_answer"]
+      }
+    },
+    {
+      "id": "PR02",
+      "group": "procedure_recipient_status",
+      "tags": ["operational_boundary", "business_trip"],
+      "pair_id": "business_trip_procedure_recipient_status",
+      "messages": [{"role": "user", "content": "На каком этапе моя командировка?"}],
+      "expected": {
+        "answerability": "operational",
+        "requested_fact_type": "current_status",
+        "intent": "one_c_operational_lookup",
+        "operational_lookup": true,
+        "clarification": false,
+        "final_modes": ["partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["invent_current_status"]
+      }
+    },
+    {
+      "id": "CV01",
+      "group": "conversational",
+      "tags": ["conversation_style", "procedure", "equipment"],
+      "messages": [{"role": "user", "content": "К кому идти за новым компьютером?"}],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "responsible_person",
+        "intent": ["roles_responsibility", "equipment_it_request"],
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer"],
+        "required_retrieval": {"sources": ["bvr_company_structure_instruction_v2 (2).txt"], "record_keys": ["employee:shkirenkov_roman:2025-12-17"], "chunk_ids": []},
+        "required_context": {"sources": ["bvr_company_structure_instruction_v2 (2).txt"], "record_keys": ["employee:shkirenkov_roman:2025-12-17"], "chunk_ids": []},
+        "forbidden_behaviors": ["route_to_one_c", "generic_no_answer"],
+        "required_answer_concepts": [["Шкиренков"]]
+      }
+    },
+    {
+      "id": "CV02",
+      "group": "conversational",
+      "tags": ["conversation_style", "responsibility"],
+      "messages": [{"role": "user", "content": "Кто главный по рабочим местам?"}],
+      "expected": {
+        "answerability": "full",
+        "requested_fact_type": "responsible_person",
+        "intent": "roles_responsibility",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer"],
+        "required_retrieval": {"sources": ["bvr_company_structure_instruction_v2 (2).txt"], "record_keys": ["employee:shkirenkov_roman:2025-12-17"], "chunk_ids": []},
+        "required_context": {"sources": ["bvr_company_structure_instruction_v2 (2).txt"], "record_keys": ["employee:shkirenkov_roman:2025-12-17"], "chunk_ids": []},
+        "forbidden_behaviors": ["route_to_one_c"],
+        "required_answer_concepts": [["Шкиренков"]]
+      }
+    },
+    {
+      "id": "CV03",
+      "group": "conversational",
+      "tags": ["conversation_style", "clarification"],
+      "messages": [{"role": "user", "content": "Кому отдать бумаги?"}],
+      "expected": {
+        "answerability": "clarification",
+        "requested_fact_type": "named_recipient",
+        "intent": "unknown",
+        "operational_lookup": false,
+        "clarification": true,
+        "final_modes": ["clarification"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["random_organization_answer"]
+      }
+    },
+    {
+      "id": "CV04",
+      "group": "conversational",
+      "tags": ["conversation_style", "clarification"],
+      "messages": [{"role": "user", "content": "Кто этим занимается?"}],
+      "expected": {
+        "answerability": "clarification",
+        "requested_fact_type": "responsible_person",
+        "intent": "unknown",
+        "operational_lookup": false,
+        "clarification": true,
+        "final_modes": ["clarification"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["random_organization_answer"]
+      }
+    },
+    {
+      "id": "CV05",
+      "group": "conversational",
+      "tags": ["conversation_style", "responsibility"],
+      "messages": [{"role": "user", "content": "Кто выпускает заказ клиенту?"}],
+      "expected": {
+        "answerability": "clarification",
+        "requested_fact_type": "responsible_person",
+        "intent": "roles_responsibility",
+        "operational_lookup": false,
+        "clarification": true,
+        "final_modes": ["clarification", "partial_answer"],
+        "required_retrieval": {"sources": ["bvr_company_structure_instruction_v2 (2).txt"], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["route_to_one_c", "random_organization_answer"]
+      }
+    },
+    {
+      "id": "RP01",
+      "group": "responsibility_paraphrase",
+      "tags": ["paraphrase", "responsibility"],
+      "messages": [{"role": "user", "content": "К кому обращаться по доставке клиенту?"}],
+      "expected": {
+        "answerability": "full",
+        "requested_fact_type": "responsible_person",
+        "intent": "roles_responsibility",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer"],
+        "required_retrieval": {"sources": ["bvr_company_structure_instruction_v2 (2).txt"], "record_keys": ["responsibility_route:logistika_i_sklad_dostavka_klientu:2025-12-17"], "chunk_ids": []},
+        "required_context": {"sources": ["bvr_company_structure_instruction_v2 (2).txt"], "record_keys": ["responsibility_route:logistika_i_sklad_dostavka_klientu:2025-12-17"], "chunk_ids": []},
+        "forbidden_behaviors": ["route_to_one_c", "generic_no_answer"],
+        "required_answer_concepts": [["Симонов"]]
+      }
+    },
+    {
+      "id": "OR01",
+      "group": "order_disposition_paraphrase",
+      "tags": ["paraphrase", "procedure", "clarification_negative"],
+      "messages": [{"role": "user", "content": "Что делать после устного распоряжения?"}],
+      "expected": {
+        "answerability": "full",
+        "requested_fact_type": "procedure",
+        "intent": "order_disposition",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer"],
+        "required_retrieval": {"sources": ["ИП-0005 Распоряжения"], "record_keys": [], "chunk_ids": [67]},
+        "required_context": {"sources": ["ИП-0005 Распоряжения"], "record_keys": [], "chunk_ids": [67]},
+        "forbidden_behaviors": ["kp_ckp_clarification", "generic_no_answer"],
+        "required_answer_concepts": [["письмен"]]
+      }
+    },
+    {
+      "id": "DF01",
+      "group": "document_flow_paraphrase",
+      "tags": ["paraphrase", "procedure", "coverage"],
+      "messages": [{"role": "user", "content": "Что у нас по документообороту?"}],
+      "expected": {
+        "answerability": "full",
+        "requested_fact_type": "policy_list",
+        "intent": "document_flow",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer"],
+        "required_retrieval": {"sources": ["ИП-0006 Документооборот"], "record_keys": [], "chunk_ids": [71, 72, 73, 74]},
+        "required_context": {"sources": ["ИП-0006 Документооборот"], "record_keys": [], "chunk_ids": [71, 72, 73, 74]},
+        "forbidden_behaviors": ["single_rule_only", "generic_no_answer"]
+      }
+    },
+    {
+      "id": "NG01",
+      "group": "responsibility_negative",
+      "tags": ["negative", "responsibility"],
+      "messages": [{"role": "user", "content": "Кто отвечает за кадровые документы?"}],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "responsible_person",
+        "intent": "roles_responsibility",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer"],
+        "required_retrieval": {"sources": ["bvr_company_structure_instruction_v2 (2).txt"], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": ["bvr_company_structure_instruction_v2 (2).txt"], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["substitute_internal_document_flow"],
+        "forbidden_answer_terms": ["Шкиренков"]
+      }
+    },
+    {
+      "id": "OP01",
+      "group": "operational_neighbor",
+      "tags": ["operational_boundary", "negative"],
+      "messages": [{"role": "user", "content": "Есть ли новый компьютер в наличии?"}],
+      "expected": {
+        "answerability": "operational",
+        "requested_fact_type": "inventory_status",
+        "intent": "one_c_operational_lookup",
+        "operational_lookup": true,
+        "clarification": false,
+        "final_modes": ["partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["invent_inventory", "semantic_procedure_as_current_inventory"]
+      }
+    }
+  ]
+}

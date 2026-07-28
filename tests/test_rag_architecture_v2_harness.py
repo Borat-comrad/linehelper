@@ -1,0 +1,717 @@
+from __future__ import annotations
+
+import copy
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from linehelper.llm.answer_generator import RagAnswerGenerator
+from linehelper.rag.query_analyzer import QueryPlan
+from linehelper.rag.retriever import RetrievedChunk
+from scripts import rag_architecture_v2_harness as harness
+from scripts import run_rag_architecture_v2_baseline as baseline_runner
+
+
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "rag_architecture_v2_cases.json"
+
+
+def test_fixture_loads_all_core_and_neighbor_cases() -> None:
+    fixture = harness.load_fixture(FIXTURE_PATH)
+    ids = {case["id"] for case in fixture["cases"]}
+
+    assert len(fixture["cases"]) == 32
+    assert {"T01", "T02", "T03", "T04", "T05A", "T05B", "T06", "T07", "T08", "T09"} <= ids
+    assert len([case for case in fixture["cases"] if "paired" in case["tags"]]) == 8
+
+
+def test_fixture_rejects_duplicate_ids() -> None:
+    fixture = harness.load_fixture(FIXTURE_PATH)
+    fixture["cases"].append(copy.deepcopy(fixture["cases"][0]))
+
+    with pytest.raises(harness.FixtureValidationError, match="duplicate case id"):
+        harness.validate_fixture(fixture)
+
+
+def test_fixture_rejects_missing_expected_contract_field() -> None:
+    fixture = harness.load_fixture(FIXTURE_PATH)
+    del fixture["cases"][0]["expected"]["requested_fact_type"]
+
+    with pytest.raises(harness.FixtureValidationError, match="requested_fact_type"):
+        harness.validate_fixture(fixture)
+
+
+def test_fixture_forbids_exact_answer_golden_text() -> None:
+    fixture = harness.load_fixture(FIXTURE_PATH)
+    fixture["cases"][0]["expected"]["exact_answer"] = "Дословный ответ"
+
+    with pytest.raises(harness.FixtureValidationError, match="exact-text"):
+        harness.validate_fixture(fixture)
+
+
+def test_select_cases_filters_by_ids_and_group() -> None:
+    fixture = harness.load_fixture(FIXTURE_PATH)
+
+    selected = harness.select_cases(
+        fixture,
+        case_ids=["PI02", "PI04"],
+        group="paired_intent",
+    )
+
+    assert [case["id"] for case in selected] == ["PI02", "PI04"]
+
+
+def test_select_cases_reports_unknown_id() -> None:
+    fixture = harness.load_fixture(FIXTURE_PATH)
+
+    with pytest.raises(harness.FixtureValidationError, match="unknown case"):
+        harness.select_cases(fixture, case_ids=["DOES_NOT_EXIST"])
+
+
+def test_evaluator_passes_matching_architectural_invariants() -> None:
+    case = _case("T06")
+    diagnostic = _diagnostic(
+        intent="roles_responsibility",
+        requested_fact_type="responsible_person",
+        answer="По доставке клиенту следует обратиться к Симоновой.",
+        raw_candidates=[_candidate(record_key=_t06_key())],
+        selected_context=[_candidate(record_key=_t06_key())],
+    )
+
+    evaluation = harness.evaluate_case(case, diagnostic)
+
+    assert evaluation["status"] == "passed"
+    assert evaluation["failure_reasons"] == []
+
+
+def test_evaluator_fails_when_required_context_is_lost() -> None:
+    case = _case("T06")
+    diagnostic = _diagnostic(
+        intent="roles_responsibility",
+        requested_fact_type="responsible_person",
+        response_kind="no_answer",
+        answer="В базе нет точного ответа.",
+        raw_candidates=[_candidate(record_key=_t06_key())],
+        selected_context=[],
+    )
+
+    evaluation = harness.evaluate_case(case, diagnostic)
+
+    assert evaluation["status"] == "failed"
+    assert any("missing from context" in reason for reason in evaluation["failure_reasons"])
+    assert any("generic no_answer" in reason for reason in evaluation["failure_reasons"])
+
+
+def test_evaluator_classifies_live_dependency_failure_as_blocked() -> None:
+    case = _case("T09")
+    diagnostic = {
+        "status": "blocked",
+        "failure_reasons": ["Ollama is not reachable"],
+    }
+
+    evaluation = harness.evaluate_case(case, diagnostic)
+
+    assert evaluation == {
+        "status": "blocked",
+        "failure_reasons": ["Ollama is not reachable"],
+        "checks": [],
+    }
+
+
+def test_evaluator_supports_explicit_not_applicable() -> None:
+    case = _case("T09")
+    case["expected"]["not_applicable"] = True
+
+    evaluation = harness.evaluate_case(case, {})
+
+    assert evaluation["status"] == "not_applicable"
+
+
+def test_evaluator_marks_unobservable_requested_fact_type_as_failure() -> None:
+    case = _case("T09")
+    diagnostic = _diagnostic(
+        intent="order_disposition",
+        requested_fact_type=harness.unavailable(
+            "not implemented in current architecture"
+        ),
+        answer="Распоряжение фиксируют письменно при первой возможности.",
+        raw_candidates=[_candidate(chunk_id=67, title="ИП-0005 Распоряжения")],
+        selected_context=[_candidate(chunk_id=67, title="ИП-0005 Распоряжения")],
+    )
+
+    evaluation = harness.evaluate_case(case, diagnostic)
+
+    assert evaluation["status"] == "failed"
+    assert any("requested_fact_type is not observable" in reason for reason in evaluation["failure_reasons"])
+
+
+def test_multi_turn_evaluation_checks_each_turn_without_exact_assistant_text() -> None:
+    case = _case("T01")
+    diagnostic = _diagnostic(
+        intent="kp_commercial_offer",
+        requested_fact_type="procedure",
+        response_kind="partial_answer",
+        answer="Отдельная подтверждённая инструкция в базе отсутствует.",
+        raw_candidates=[],
+        selected_context=[],
+        clarification=False,
+    )
+    diagnostic["resolved_question"] = "Как оформить коммерческое предложение?"
+    diagnostic["turns"] = [
+        {
+            "clarification": {
+                "available": True,
+                "needed": True,
+                "ambiguity_span": "КП",
+            }
+        },
+        {
+            "clarification": {
+                "available": True,
+                "needed": False,
+                "ambiguity_span": None,
+            }
+        },
+    ]
+
+    evaluation = harness.evaluate_case(case, diagnostic)
+
+    assert evaluation["status"] == "passed"
+
+
+def test_answer_concepts_accept_paraphrase_instead_of_exact_text() -> None:
+    case = _case("T09")
+    diagnostic = _diagnostic(
+        intent="order_disposition",
+        requested_fact_type="normative_rule",
+        answer=(
+            "Форма должна быть письменной. Если сообщение прозвучало устно, "
+            "его фиксируют письменно при первой возможности."
+        ),
+        raw_candidates=[_candidate(chunk_id=67, title="ИП-0005 Распоряжения")],
+        selected_context=[_candidate(chunk_id=67, title="ИП-0005 Распоряжения")],
+    )
+
+    evaluation = harness.evaluate_case(case, diagnostic)
+
+    assert evaluation["status"] == "passed"
+
+
+def test_forbidden_person_is_reported_as_unsupported() -> None:
+    case = _case("T08")
+    diagnostic = _diagnostic(
+        intent="roles_responsibility",
+        requested_fact_type="responsible_person",
+        answer="За внутренний документооборот отвечает Прокошина.",
+        raw_candidates=[
+            _candidate(chunk_id=437),
+            _candidate(chunk_id=439),
+        ],
+        selected_context=[
+            _candidate(chunk_id=437),
+            _candidate(chunk_id=439),
+        ],
+    )
+
+    evaluation = harness.evaluate_case(case, diagnostic)
+
+    assert evaluation["status"] == "failed"
+    assert any("Прокошина" in reason for reason in evaluation["failure_reasons"])
+
+
+def test_aggregate_metrics_preserves_not_available_values() -> None:
+    cases = [_case("T01")]
+    diagnostic = _diagnostic(
+        intent="kp_commercial_offer",
+        requested_fact_type=harness.unavailable("missing"),
+        response_kind="partial_answer",
+        answer="Инструкции нет.",
+        raw_candidates=[],
+        selected_context=[],
+    )
+    diagnostic["case_id"] = "T01"
+    diagnostic["resolved_question"] = harness.unavailable("history is not accepted")
+    diagnostic = harness.apply_evaluation(cases[0], diagnostic)
+
+    metrics = harness.aggregate_metrics(cases, [diagnostic])
+
+    assert metrics["multi_turn_resolution_rate"] == "not_available"
+    assert metrics["evidence_coverage_rate"] == "not_available"
+    assert metrics["total_cases"] == 1
+
+
+def test_aggregate_metrics_computes_recall_and_context_rates() -> None:
+    cases = [_case("T06")]
+    diagnostic = _diagnostic(
+        intent="roles_responsibility",
+        requested_fact_type="responsible_person",
+        answer="Симонова отвечает за доставку.",
+        raw_candidates=[_candidate(record_key=_t06_key(), retrieval_rank=3)],
+        selected_context=[_candidate(record_key=_t06_key())],
+    )
+    diagnostic["case_id"] = "T06"
+    diagnostic = harness.apply_evaluation(cases[0], diagnostic)
+
+    metrics = harness.aggregate_metrics(cases, [diagnostic])
+
+    assert metrics["required_chunk_recall_at_5"]["rate"] == 1.0
+    assert metrics["required_chunk_recall_at_5"]["required"] == 1
+    assert metrics["required_chunk_recall_at_10"]["rate"] == 1.0
+    assert metrics["required_chunk_in_context_rate"]["rate"] == 1.0
+
+
+def test_generic_no_answer_metric_requires_stable_evidence_identity() -> None:
+    cases = [_case("T06")]
+    diagnostic = _diagnostic(
+        intent="one_c_operational_lookup",
+        requested_fact_type="responsible_person",
+        operational=True,
+        response_kind="no_answer",
+        answer="В базе нет точного ответа.",
+        raw_candidates=[_candidate(record_key=_t06_key())],
+        selected_context=[],
+    )
+    diagnostic["case_id"] = "T06"
+    diagnostic = harness.apply_evaluation(cases[0], diagnostic)
+
+    metrics = harness.aggregate_metrics(cases, [diagnostic])
+
+    assert metrics["generic_no_answer_when_evidence_exists"] == 1
+
+
+def test_json_and_jsonl_serialization_preserve_cyrillic(tmp_path: Path) -> None:
+    json_path = tmp_path / "baseline.json"
+    jsonl_path = tmp_path / "cases.jsonl"
+    value = {"answer": "Письменное распоряжение"}
+
+    harness.write_json(json_path, value)
+    harness.write_jsonl(jsonl_path, [value])
+
+    assert json.loads(json_path.read_text(encoding="utf-8")) == value
+    assert json.loads(jsonl_path.read_text(encoding="utf-8")) == value
+    assert "Письменное" in json_path.read_text(encoding="utf-8")
+
+
+def test_markdown_report_contains_metrics_and_case_status() -> None:
+    markdown = harness.render_summary_markdown(
+        title="Baseline",
+        metrics={"total_cases": 1, "passed": 1},
+        records=[
+            {
+                "case_id": "T09",
+                "status": "passed",
+                "intent": "order_disposition",
+                "response_kind": "answer",
+                "failure_reasons": [],
+            }
+        ],
+    )
+
+    assert "# Baseline" in markdown
+    assert "| T09 | passed | order_disposition | answer |" in markdown
+
+
+def test_repeatability_ignores_final_text_and_compares_architecture() -> None:
+    first = _diagnostic(answer="Первая формулировка")
+    first["case_id"] = "T09"
+    second = _diagnostic(answer="Совсем другая формулировка")
+    second["case_id"] = "T09"
+
+    repeatability = harness.build_repeatability([first, second])
+
+    assert repeatability["T09"]["all_available_dimensions_stable"] is True
+
+
+def test_repeatability_detects_context_instability() -> None:
+    first = _diagnostic(selected_context=[_candidate(chunk_id=67)])
+    first["case_id"] = "T09"
+    second = _diagnostic(selected_context=[_candidate(chunk_id=20)])
+    second["case_id"] = "T09"
+
+    repeatability = harness.build_repeatability([first, second])
+
+    assert repeatability["T09"]["dimensions"]["context_chunks"]["stable"] is False
+
+
+def test_repeatability_compares_each_multi_turn_decision() -> None:
+    first = _diagnostic()
+    first["case_id"] = "T01"
+    first["turns"] = [
+        _diagnostic(clarification=True, response_kind="clarification"),
+        _diagnostic(
+            intent="kp_commercial_offer",
+            response_kind="partial_answer",
+        ),
+    ]
+    second = copy.deepcopy(first)
+    second["turns"][0]["clarification"]["needed"] = False
+    second["turns"][0]["response_kind"] = "answer"
+
+    repeatability = harness.build_repeatability([first, second])
+
+    dimensions = repeatability["T01"]["dimensions"]
+    assert dimensions["turn_1_clarification"]["stable"] is False
+    assert dimensions["turn_1_response_kind"]["stable"] is False
+    assert dimensions["turn_2_intent"]["stable"] is True
+
+
+def test_selected_context_join_restores_record_key_from_recorded_chunk() -> None:
+    raw = [_candidate(record_key=_t06_key(), score=120.0)]
+    source = {
+        "title": raw[0]["title"],
+        "source": raw[0]["source"],
+        "section": raw[0]["section"],
+        "score": 120.0,
+    }
+
+    selected = harness.selected_context_from_sources([source], raw)
+
+    assert selected[0]["record_key"] == _t06_key()
+    assert selected[0]["selected_via"] == "rag_source_candidate_join"
+
+
+def test_recording_retriever_is_transparent_and_records_queries() -> None:
+    chunk = _retrieved_chunk()
+    inner = StaticRetriever([chunk])
+    recording = harness.RecordingRetriever(inner)
+
+    result = recording.retrieve("доставка клиенту", limit=5, candidate_limit=30)
+
+    assert result == [chunk]
+    assert inner.questions == ["доставка клиенту"]
+    assert recording.calls[0]["chunks"][0]["record_key"] == _t06_key()
+
+
+def test_deterministic_orchestration_keeps_required_responsibility_context() -> None:
+    recording = harness.RecordingRetriever(StaticRetriever([_retrieved_chunk()]))
+    client = FakeLlm("За доставку клиенту отвечает Симонова.")
+    generator = RagAnswerGenerator(
+        retriever=recording,
+        llm_client=client,
+        query_analyzer=StaticAnalyzer(_responsibility_plan()),
+        context_limit=3,
+    )
+
+    result = generator.answer("Кто отвечает за отгрузку клиенту?")
+    raw_candidates = recording.flattened_candidates()
+    selected = harness.selected_context_from_sources(result.sources, raw_candidates)
+
+    assert recording.calls
+    assert result.query_plan["intent"] == "roles_responsibility"
+    assert result.response_kind == "answer"
+    assert selected[0]["record_key"] == _t06_key()
+    assert "Прокошина" not in result.answer
+
+
+def test_deterministic_orchestration_valid_clarification_stops_retrieval() -> None:
+    recording = harness.RecordingRetriever(StaticRetriever([_retrieved_chunk()]))
+    client = FakeLlm("unused")
+    generator = RagAnswerGenerator(
+        retriever=recording,
+        llm_client=client,
+        query_analyzer=StaticAnalyzer(_clarification_plan()),
+    )
+
+    result = generator.answer("Как оформить КП?")
+
+    assert result.response_kind == "clarification"
+    assert recording.calls == []
+    assert client.messages == []
+
+
+def test_deterministic_orchestration_operational_plan_rejects_semantic_noise() -> None:
+    recording = harness.RecordingRetriever(StaticRetriever([_retrieved_chunk()]))
+    client = FakeLlm("unused")
+    generator = RagAnswerGenerator(
+        retriever=recording,
+        llm_client=client,
+        query_analyzer=StaticAnalyzer(_operational_plan()),
+    )
+
+    result = generator.answer("Какой статус заказа №12345?")
+
+    assert result.query_plan["intent"] == "one_c_operational_lookup"
+    assert result.response_kind == "no_answer"
+    assert result.sources == []
+    assert client.messages == []
+
+
+def test_live_runner_cli_supports_documented_parameters() -> None:
+    args = baseline_runner._parse_args(
+        [
+            "--case-id",
+            "T06",
+            "--group",
+            "responsibility_shipping",
+            "--repeat",
+            "3",
+            "--model",
+            "answer-model",
+            "--analyzer-model",
+            "analyzer-model",
+            "--output-dir",
+            "out",
+            "--retrieval-only",
+            "--verbose",
+        ]
+    )
+
+    assert args.case_id == ["T06"]
+    assert args.group == "responsibility_shipping"
+    assert args.repeat == 3
+    assert args.model == "answer-model"
+    assert args.analyzer_model == "analyzer-model"
+    assert args.output_dir == Path("out")
+    assert args.retrieval_only is True
+    assert args.verbose is True
+
+
+def test_live_runner_uses_query_analyzer_default_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OLLAMA_ANALYZER_MODEL", raising=False)
+
+    assert baseline_runner._select_analyzer_model(None) == "qwen2.5:3b"
+    assert baseline_runner._select_analyzer_model("custom") == "custom"
+
+
+def test_retrieval_only_runner_records_absent_layers_as_unavailable() -> None:
+    case = _case("T06")
+    retriever = harness.RecordingRetriever(StaticRetriever([_retrieved_chunk()]))
+
+    diagnostic = baseline_runner._run_retrieval_only_case(
+        case,
+        repeat_index=1,
+        retriever=retriever,
+    )
+
+    assert diagnostic["raw_candidates"][0]["record_key"] == _t06_key()
+    assert diagnostic["query_plan"]["available"] is False
+    assert diagnostic["selected_context"]["available"] is False
+
+
+def test_blocked_live_records_do_not_become_unit_failures() -> None:
+    case = _case("T09")
+
+    records = baseline_runner._blocked_records(
+        [case],
+        repeat=2,
+        reasons=["Ollama unavailable"],
+    )
+
+    assert len(records) == 2
+    assert {record["status"] for record in records} == {"blocked"}
+
+
+def test_live_runner_writes_blocked_artifacts_when_preflight_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        baseline_runner,
+        "_preflight",
+        lambda **_: {
+            "ok": False,
+            "db_exists": True,
+            "retrieval_only": False,
+            "ollama": {"required": True, "ok": False},
+            "errors": ["Ollama unavailable"],
+        },
+    )
+
+    exit_code = baseline_runner.main(
+        [
+            "--case-id",
+            "T06",
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+
+    run_dirs = [path for path in tmp_path.iterdir() if path.is_dir()]
+    assert exit_code == 0
+    assert len(run_dirs) == 1
+    baseline = json.loads(
+        (run_dirs[0] / "baseline.json").read_text(encoding="utf-8")
+    )
+    assert baseline["metrics"]["blocked"] == 1
+    assert (run_dirs[0] / "cases.jsonl").exists()
+    assert (run_dirs[0] / "summary.md").exists()
+
+
+def _case(case_id: str) -> dict[str, Any]:
+    fixture = harness.load_fixture(FIXTURE_PATH)
+    return copy.deepcopy(next(case for case in fixture["cases"] if case["id"] == case_id))
+
+
+def _diagnostic(
+    *,
+    intent: Any = "order_disposition",
+    requested_fact_type: Any = "normative_rule",
+    clarification: bool = False,
+    operational: bool = False,
+    response_kind: Any = "answer",
+    answer: Any = "Распоряжение оформляется письменно при первой возможности.",
+    raw_candidates: Any = None,
+    selected_context: Any = None,
+) -> dict[str, Any]:
+    return {
+        "resolved_question": harness.unavailable("not implemented"),
+        "query_plan": {"intent": intent} if isinstance(intent, str) else {},
+        "requested_fact_type": requested_fact_type,
+        "intent": intent,
+        "clarification": {
+            "available": True,
+            "needed": clarification,
+            "ambiguity_span": None,
+        },
+        "operational_boundary": {
+            "available": True,
+            "operational_lookup": operational,
+            "derived_from": "intent",
+        },
+        "retrieval_queries": [],
+        "raw_candidates": [] if raw_candidates is None else raw_candidates,
+        "merged_candidates": harness.unavailable("not implemented"),
+        "selected_context": [] if selected_context is None else selected_context,
+        "evidence_decision": harness.unavailable("not implemented"),
+        "answer": answer,
+        "sources": [],
+        "duration_ms": 1,
+        "response_kind": response_kind,
+        "turns": [],
+        "status": "passed",
+        "failure_reasons": [],
+    }
+
+
+def _candidate(
+    *,
+    chunk_id: int | None = None,
+    record_key: str | None = None,
+    title: str = "bvr_company_structure_instruction_v2 (2).txt",
+    source: str = "bvr_company_structure_instruction_v2 (2).txt",
+    section: str = "Маршрут ответственности",
+    score: float = 120.0,
+    retrieval_rank: int | None = None,
+) -> dict[str, Any]:
+    value = {
+        "chunk_id": chunk_id,
+        "record_key": record_key,
+        "title": title,
+        "source": source,
+        "section": section,
+        "score": score,
+        "metadata": {"record_key": record_key} if record_key else {},
+    }
+    if retrieval_rank is not None:
+        value["retrieval_rank"] = retrieval_rank
+    return value
+
+
+def _retrieved_chunk() -> RetrievedChunk:
+    return RetrievedChunk(
+        chunk_id=594,
+        title="Маршрут: ЛОГИСТИКА И СКЛАД — Доставка клиенту",
+        source="bvr_company_structure_instruction_v2 (2).txt",
+        section="Логистика и склад",
+        page=None,
+        text=(
+            "По вопросам функции Доставка клиенту следует обращаться к "
+            "Симоновой Татьяне. Она является первичным ответственным контактом."
+        ),
+        score=100.0,
+        metadata={
+            "doc_type": "responsibility_route",
+            "knowledge_domain": "organization_structure",
+            "record_key": _t06_key(),
+        },
+        doc_type="responsibility_route",
+        base_score=100.0,
+        rerank_score=20.0,
+        final_score=120.0,
+        matched_terms=["доставка", "клиенту"],
+        matched_excerpt="Доставка клиенту — Симонова Татьяна.",
+        selection_reasons=["fake deterministic evidence"],
+    )
+
+
+def _t06_key() -> str:
+    return "responsibility_route:logistika_i_sklad_dostavka_klientu:2025-12-17"
+
+
+class StaticRetriever:
+    def __init__(self, chunks: list[RetrievedChunk]) -> None:
+        self.chunks = chunks
+        self.questions: list[str] = []
+
+    def retrieve(self, question: str, **_: Any) -> list[RetrievedChunk]:
+        self.questions.append(question)
+        return list(self.chunks)
+
+
+class StaticAnalyzer:
+    last_error = None
+
+    def __init__(self, plan: QueryPlan) -> None:
+        self.plan = plan
+        self.questions: list[str] = []
+
+    def analyze(self, question: str) -> QueryPlan:
+        self.questions.append(question)
+        return self.plan
+
+
+class FakeLlm:
+    model = "fake-model"
+
+    def __init__(self, answer: str) -> None:
+        self.answer = answer
+        self.messages: list[list[dict[str, str]]] = []
+
+    def chat(self, messages: list[dict[str, str]]) -> str:
+        self.messages.append(messages)
+        return self.answer
+
+
+def _responsibility_plan() -> QueryPlan:
+    return QueryPlan(
+        intent="roles_responsibility",
+        normalized_question="Кто отвечает за доставку клиенту?",
+        query_expansions=["ответственный за доставку клиенту"],
+        preferred_sources=["bvr_company_structure_instruction_v2 (2).txt"],
+        answer_type="general",
+        needs_clarification=False,
+        clarification_question=None,
+        confidence=1.0,
+        notes="deterministic test plan",
+    )
+
+
+def _clarification_plan() -> QueryPlan:
+    return QueryPlan(
+        intent="ambiguous_abbreviation",
+        normalized_question="Как оформить КП?",
+        query_expansions=["КП"],
+        preferred_sources=[],
+        answer_type="clarification",
+        needs_clarification=True,
+        clarification_question="Уточните: КП или ЦКП?",
+        confidence=1.0,
+        notes="deterministic test plan",
+    )
+
+
+def _operational_plan() -> QueryPlan:
+    return QueryPlan(
+        intent="one_c_operational_lookup",
+        normalized_question="Какой текущий статус заказа №12345?",
+        query_expansions=["статус заказа"],
+        preferred_sources=[],
+        answer_type="partial_answer",
+        needs_clarification=False,
+        clarification_question=None,
+        confidence=1.0,
+        notes="deterministic test plan",
+    )
