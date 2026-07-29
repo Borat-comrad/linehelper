@@ -49,6 +49,16 @@ CLARIFICATION_KINDS = frozenset(
         "missing_required_slot",
     }
 )
+RESOLUTION_KINDS = frozenset(
+    {
+        "standalone",
+        "clarification_answer",
+        "missing_slot_answer",
+        "explicit_follow_up",
+        "topic_change",
+        "unresolved_follow_up",
+    }
+)
 
 
 class FixtureValidationError(ValueError):
@@ -166,6 +176,40 @@ def validate_fixture(payload: Any) -> None:
         ):
             raise FixtureValidationError(
                 f"{where}.expected.ambiguity_span must be a string"
+            )
+        if "resolved_question" in expected and not isinstance(
+            expected["resolved_question"],
+            str,
+        ):
+            raise FixtureValidationError(
+                f"{where}.expected.resolved_question must be a string"
+            )
+        if (
+            "resolution_kind" in expected
+            and expected["resolution_kind"] not in RESOLUTION_KINDS
+        ):
+            raise FixtureValidationError(
+                f"{where}.expected.resolution_kind is invalid"
+            )
+        for boolean_field in (
+            "is_follow_up",
+            "topic_changed",
+            "conversation_history_used",
+            "stale_context_forbidden",
+        ):
+            if boolean_field in expected and not isinstance(
+                expected[boolean_field],
+                bool,
+            ):
+                raise FixtureValidationError(
+                    f"{where}.expected.{boolean_field} must be boolean"
+                )
+        if "inherited_slots" in expected and not isinstance(
+            expected["inherited_slots"],
+            list,
+        ):
+            raise FixtureValidationError(
+                f"{where}.expected.inherited_slots must be a list"
             )
         if not _as_expected_values(expected["intent"]):
             raise FixtureValidationError(f"{where}.expected.intent must not be empty")
@@ -392,6 +436,32 @@ def evaluate_case(
             diagnostic.get("resolved_question"),
             normalize_text=True,
         )
+    for field in (
+        "is_follow_up",
+        "topic_changed",
+        "conversation_history_used",
+    ):
+        if field in expected:
+            _check_value(
+                checks,
+                field,
+                expected[field],
+                diagnostic.get(field),
+            )
+    if "resolution_kind" in expected:
+        _check_value(
+            checks,
+            "resolution_kind",
+            expected["resolution_kind"],
+            diagnostic.get("resolution_kind"),
+        )
+    if "inherited_slots" in expected:
+        _check_sequence_subset(
+            checks,
+            "inherited_slots",
+            expected["inherited_slots"],
+            diagnostic.get("inherited_slots"),
+        )
 
     _check_membership(
         checks,
@@ -569,6 +639,46 @@ def aggregate_metrics(
         "multi_turn_resolution_rate": _multi_turn_resolution_rate(
             case_by_id, selected_records
         ),
+        "resolved_question_available_rate": _resolved_question_available_rate(
+            selected_records
+        ),
+        "resolved_question_accuracy": _resolved_question_accuracy(
+            case_by_id,
+            selected_records,
+        ),
+        "topic_change_accuracy": _expected_scalar_accuracy(
+            case_by_id,
+            selected_records,
+            expected_key="topic_changed",
+            actual_key="topic_changed",
+        ),
+        "slot_inheritance_accuracy": _expected_sequence_accuracy(
+            case_by_id,
+            selected_records,
+            expected_key="inherited_slots",
+            actual_key="inherited_slots",
+        ),
+        "stale_context_leak_count": _stale_context_leak_count(
+            case_by_id,
+            selected_records,
+        ),
+        "history_used_when_required": _expected_scalar_accuracy(
+            case_by_id,
+            selected_records,
+            expected_key="conversation_history_used",
+            actual_key="conversation_history_used",
+            expected_filter=True,
+        ),
+        "history_used_when_not_required": _expected_scalar_accuracy(
+            case_by_id,
+            selected_records,
+            expected_key="conversation_history_used",
+            actual_key="conversation_history_used",
+            expected_filter=False,
+        ),
+        "repeated_clarification_after_resolution": (
+            _repeated_clarification_after_resolution(selected_records)
+        ),
     }
     metrics["T01_T09_pass_rate"] = _group_pass_rate(
         case_by_id,
@@ -588,6 +698,16 @@ def aggregate_metrics(
         selected_records,
         lambda case: "conversation" in case.get("tags", [])
         or "conversation_seed" in case.get("tags", []),
+    )
+    metrics["conversation_cases_total"] = (
+        metrics["conversation_cases"].get("cases")
+        if isinstance(metrics["conversation_cases"], Mapping)
+        else "not_available"
+    )
+    metrics["conversation_cases_passed"] = (
+        metrics["conversation_cases"].get("passed")
+        if isinstance(metrics["conversation_cases"], Mapping)
+        else "not_available"
     )
     metrics["responsibility_cases"] = _group_pass_rate(
         case_by_id,
@@ -683,6 +803,22 @@ def build_repeatability(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 _observable_scalar(record.get("response_kind"))
                 for record in case_records
             ],
+            "resolved_question": [
+                _observable_scalar(record.get("resolved_question"))
+                for record in case_records
+            ],
+            "resolution_kind": [
+                _observable_scalar(record.get("resolution_kind"))
+                for record in case_records
+            ],
+            "inherited_slots": [
+                _observable_scalar(record.get("inherited_slots"))
+                for record in case_records
+            ],
+            "topic_changed": [
+                _observable_scalar(record.get("topic_changed"))
+                for record in case_records
+            ],
         }
         max_turns = max(
             (
@@ -749,6 +885,16 @@ def build_repeatability(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 )
                 for record in case_records
             ]
+            for field in (
+                "resolved_question",
+                "resolution_kind",
+                "inherited_slots",
+                "topic_changed",
+            ):
+                dimensions[f"turn_{turn_number}_{field}"] = [
+                    _observable_scalar(_turn(record, turn_index).get(field))
+                    for record in case_records
+                ]
         comparisons = {
             name: _repeatability_dimension(values)
             for name, values in dimensions.items()
@@ -1029,6 +1175,40 @@ def _check_mapping_subset(
     )
 
 
+def _check_sequence_subset(
+    checks: list[dict[str, Any]],
+    name: str,
+    expected: Sequence[Any],
+    actual: Any,
+) -> None:
+    if not isinstance(actual, (list, tuple)):
+        checks.append(
+            _failed_check(name, list(expected), actual, f"{name} is not observable")
+        )
+        return
+    normalized_actual = {_normalize(value) for value in actual}
+    missing = [
+        value for value in expected if _normalize(value) not in normalized_actual
+    ]
+    extras = [
+        value for value in actual if _normalize(value) not in {_normalize(v) for v in expected}
+    ]
+    passed = not missing and not extras
+    checks.append(
+        _check(
+            name,
+            passed,
+            list(expected),
+            list(actual),
+            (
+                f"{name} matched"
+                if passed
+                else f"{name}: missing {missing!r}, unexpected {extras!r}"
+            ),
+        )
+    )
+
+
 def _check_artifacts(
     checks: list[dict[str, Any]],
     stage: str,
@@ -1207,6 +1387,29 @@ def _check_turns(
                 expectation["missing_slots"],
                 clarification,
                 "missing_slots",
+            )
+        if "resolved_question" in expectation:
+            _check_value(
+                checks,
+                f"turn_{turn_number}_resolved_question",
+                expectation["resolved_question"],
+                actual.get("resolved_question") if isinstance(actual, Mapping) else None,
+                normalize_text=True,
+            )
+        for field in ("is_follow_up", "topic_changed", "resolution_kind"):
+            if field in expectation:
+                _check_value(
+                    checks,
+                    f"turn_{turn_number}_{field}",
+                    expectation[field],
+                    actual.get(field) if isinstance(actual, Mapping) else None,
+                )
+        if "inherited_slots" in expectation:
+            _check_sequence_subset(
+                checks,
+                f"turn_{turn_number}_inherited_slots",
+                expectation["inherited_slots"],
+                actual.get("inherited_slots") if isinstance(actual, Mapping) else None,
             )
 
 
@@ -1712,6 +1915,157 @@ def _generic_no_answer_count(
         if evidence_exists and record.get("response_kind") == "no_answer":
             count += 1
     return count if comparable else "not_available"
+
+
+def _resolved_question_available_rate(
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | str:
+    if not records:
+        return "not_available"
+    available = sum(
+        1
+        for record in records
+        if record.get("resolved_question") is not None
+        and is_available(record.get("resolved_question"))
+    )
+    return {
+        "available": available,
+        "total": len(records),
+        "rate": round(available / len(records), 4),
+    }
+
+
+def _resolved_question_accuracy(
+    case_by_id: Mapping[str, Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | str:
+    correct = 0
+    comparable = 0
+    for record in records:
+        expected = case_by_id[str(record["case_id"])]["expected"].get(
+            "resolved_question"
+        )
+        if expected is None:
+            continue
+        actual = record.get("resolved_question")
+        if actual is None or not is_available(actual):
+            continue
+        comparable += 1
+        if _normalize(expected) == _normalize(actual):
+            correct += 1
+    if not comparable:
+        return "not_available"
+    return {
+        "correct": correct,
+        "comparable": comparable,
+        "rate": round(correct / comparable, 4),
+    }
+
+
+def _expected_scalar_accuracy(
+    case_by_id: Mapping[str, Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+    *,
+    expected_key: str,
+    actual_key: str,
+    expected_filter: Any = None,
+) -> dict[str, Any] | str:
+    correct = 0
+    comparable = 0
+    for record in records:
+        expected_map = case_by_id[str(record["case_id"])]["expected"]
+        if expected_key not in expected_map:
+            continue
+        expected = expected_map[expected_key]
+        if expected_filter is not None and expected is not expected_filter:
+            continue
+        actual = record.get(actual_key)
+        if actual is None or not is_available(actual):
+            continue
+        comparable += 1
+        if actual == expected:
+            correct += 1
+    if not comparable:
+        return "not_available"
+    return {
+        "correct": correct,
+        "comparable": comparable,
+        "rate": round(correct / comparable, 4),
+    }
+
+
+def _expected_sequence_accuracy(
+    case_by_id: Mapping[str, Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+    *,
+    expected_key: str,
+    actual_key: str,
+) -> dict[str, Any] | str:
+    correct = 0
+    comparable = 0
+    for record in records:
+        expected_map = case_by_id[str(record["case_id"])]["expected"]
+        if expected_key not in expected_map:
+            continue
+        expected = expected_map[expected_key]
+        actual = record.get(actual_key)
+        if not isinstance(expected, list) or not isinstance(actual, (list, tuple)):
+            continue
+        comparable += 1
+        if {_normalize(value) for value in expected} == {
+            _normalize(value) for value in actual
+        }:
+            correct += 1
+    if not comparable:
+        return "not_available"
+    return {
+        "correct": correct,
+        "comparable": comparable,
+        "rate": round(correct / comparable, 4),
+    }
+
+
+def _stale_context_leak_count(
+    case_by_id: Mapping[str, Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+) -> int | str:
+    comparable = 0
+    leaks = 0
+    for record in records:
+        expected = case_by_id[str(record["case_id"])]["expected"]
+        if expected.get("stale_context_forbidden") is not True:
+            continue
+        inherited = record.get("inherited_slots")
+        if not isinstance(inherited, (list, tuple)):
+            continue
+        comparable += 1
+        if inherited:
+            leaks += 1
+    return leaks if comparable else "not_available"
+
+
+def _repeated_clarification_after_resolution(
+    records: Sequence[Mapping[str, Any]],
+) -> int | str:
+    comparable = 0
+    repeated = 0
+    for record in records:
+        resolution_kind = record.get("resolution_kind")
+        if not isinstance(resolution_kind, str) or resolution_kind not in {
+            "clarification_answer",
+            "missing_slot_answer",
+        }:
+            continue
+        clarification = record.get("clarification")
+        if not isinstance(clarification, Mapping) or not is_available(clarification):
+            continue
+        needed = clarification.get("needed")
+        if not isinstance(needed, bool):
+            continue
+        comparable += 1
+        if needed:
+            repeated += 1
+    return repeated if comparable else "not_available"
 
 
 def _multi_turn_resolution_rate(

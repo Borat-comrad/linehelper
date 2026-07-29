@@ -24,6 +24,11 @@
         "operational_lookup": false,
         "clarification": false,
         "resolved_question": "Как оформить коммерческое предложение?",
+        "is_follow_up": true,
+        "topic_changed": false,
+        "resolution_kind": "clarification_answer",
+        "inherited_slots": ["meaning_of_КП"],
+        "conversation_history_used": true,
         "final_modes": ["partial_answer", "no_answer"],
         "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
         "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
@@ -39,7 +44,15 @@
               "ценный конечный продукт"
             ]
           },
-          {"turn": 2, "clarification": false}
+          {
+            "turn": 2,
+            "clarification": false,
+            "resolved_question": "Как оформить коммерческое предложение?",
+            "is_follow_up": true,
+            "topic_changed": false,
+            "resolution_kind": "clarification_answer",
+            "inherited_slots": ["meaning_of_КП"]
+          }
         ]
       }
     },
@@ -1033,6 +1046,321 @@
         "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
         "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
         "forbidden_behaviors": ["random_organization_answer"]
+      }
+    },
+    {
+      "id": "CR01",
+      "group": "conversation_resolution",
+      "tags": ["conversation", "stage_3", "clarification_answer"],
+      "messages": [
+        {"role": "user", "content": "Как оформить КП?"},
+        {"role": "user", "content": "Коммерческое предложение"}
+      ],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "procedure",
+        "intent": "kp_commercial_offer",
+        "operational_lookup": false,
+        "clarification": false,
+        "resolved_question": "Как оформить коммерческое предложение?",
+        "is_follow_up": true,
+        "topic_changed": false,
+        "resolution_kind": "clarification_answer",
+        "inherited_slots": ["meaning_of_КП"],
+        "conversation_history_used": true,
+        "final_modes": ["partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["repeat_kp_clarification", "invent_missing_instruction"]
+      }
+    },
+    {
+      "id": "CR02",
+      "group": "conversation_resolution",
+      "tags": ["conversation", "stage_3", "missing_slot"],
+      "messages": [
+        {"role": "user", "content": "Кому отдать документы?"},
+        {"role": "user", "content": "Кадровые"}
+      ],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "document_recipient",
+        "intent": ["document_flow", "roles_responsibility", "unknown"],
+        "operational_lookup": false,
+        "clarification": false,
+        "resolved_question": "Кому отдать кадровые документы?",
+        "is_follow_up": true,
+        "topic_changed": false,
+        "resolution_kind": "missing_slot_answer",
+        "inherited_slots": ["document_type"],
+        "conversation_history_used": true,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["repeat_kp_clarification"]
+      }
+    },
+    {
+      "id": "CR03",
+      "group": "conversation_resolution",
+      "tags": ["conversation", "stage_3", "missing_slot"],
+      "messages": [
+        {"role": "user", "content": "Куда направить заявление?"},
+        {"role": "user", "content": "На командировку"}
+      ],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "document_recipient",
+        "intent": "business_trip",
+        "operational_lookup": false,
+        "clarification": false,
+        "resolved_question": "Куда направить заявление на командировку?",
+        "is_follow_up": true,
+        "topic_changed": false,
+        "resolution_kind": "missing_slot_answer",
+        "inherited_slots": ["application_type"],
+        "conversation_history_used": true,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["repeat_kp_clarification"]
+      }
+    },
+    {
+      "id": "CR04",
+      "group": "conversation_resolution",
+      "tags": ["conversation", "stage_3", "missing_slot"],
+      "messages": [
+        {"role": "user", "content": "Кто этим занимается?"},
+        {"role": "user", "content": "Внутренним документооборотом"}
+      ],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "responsible_person",
+        "intent": "roles_responsibility",
+        "operational_lookup": false,
+        "clarification": false,
+        "resolved_question": "Кто занимается внутренним документооборотом?",
+        "is_follow_up": true,
+        "topic_changed": false,
+        "resolution_kind": "missing_slot_answer",
+        "inherited_slots": ["subject"],
+        "conversation_history_used": true,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["repeat_kp_clarification"]
+      }
+    },
+    {
+      "id": "CR05",
+      "group": "conversation_resolution",
+      "tags": ["conversation", "stage_3", "topic_change", "responsibility"],
+      "messages": [
+        {"role": "user", "content": "Как оформить КП?"},
+        {"role": "user", "content": "Кто отвечает за таможню?"}
+      ],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "responsible_person",
+        "intent": "roles_responsibility",
+        "operational_lookup": false,
+        "clarification": false,
+        "resolved_question": "Кто отвечает за таможню?",
+        "is_follow_up": false,
+        "topic_changed": true,
+        "resolution_kind": "topic_change",
+        "inherited_slots": [],
+        "conversation_history_used": true,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["repeat_kp_clarification", "route_to_one_c"]
+      }
+    },
+    {
+      "id": "CR06",
+      "group": "conversation_resolution",
+      "tags": ["conversation", "stage_3", "no_history"],
+      "messages": [
+        {"role": "user", "content": "Коммерческое предложение"}
+      ],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "definition",
+        "intent": "kp_commercial_offer",
+        "operational_lookup": false,
+        "clarification": false,
+        "resolved_question": "Коммерческое предложение",
+        "is_follow_up": false,
+        "topic_changed": false,
+        "resolution_kind": "standalone",
+        "inherited_slots": [],
+        "conversation_history_used": false,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["invent_missing_instruction"]
+      }
+    },
+    {
+      "id": "CR07",
+      "group": "conversation_resolution",
+      "tags": ["conversation", "stage_3", "stale_state", "responsibility"],
+      "messages": [
+        {"role": "user", "content": "Как оформить КП?"},
+        {"role": "user", "content": "Коммерческое предложение"},
+        {"role": "user", "content": "Кто отвечает за рабочие места?"}
+      ],
+      "expected": {
+        "answerability": "full",
+        "requested_fact_type": "responsible_person",
+        "intent": "roles_responsibility",
+        "operational_lookup": false,
+        "clarification": false,
+        "resolved_question": "Кто отвечает за рабочие места?",
+        "is_follow_up": false,
+        "topic_changed": false,
+        "resolution_kind": "standalone",
+        "inherited_slots": [],
+        "conversation_history_used": false,
+        "stale_context_forbidden": true,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["repeat_kp_clarification", "route_to_one_c"]
+      }
+    },
+    {
+      "id": "CR08",
+      "group": "conversation_resolution",
+      "tags": ["conversation", "stage_3", "invalid_slot"],
+      "messages": [
+        {"role": "user", "content": "Кому отдать документы?"},
+        {"role": "user", "content": "Не знаю"}
+      ],
+      "expected": {
+        "answerability": "clarification",
+        "requested_fact_type": "unknown",
+        "intent": "unknown",
+        "operational_lookup": false,
+        "clarification": true,
+        "clarification_kind": "missing_document_type",
+        "missing_slots": ["document_type"],
+        "resolved_question": "Не знаю",
+        "is_follow_up": true,
+        "topic_changed": false,
+        "resolution_kind": "unresolved_follow_up",
+        "inherited_slots": [],
+        "conversation_history_used": true,
+        "final_modes": ["clarification"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["random_organization_answer"]
+      }
+    },
+    {
+      "id": "CR09",
+      "group": "conversation_resolution",
+      "tags": ["conversation", "stage_3", "clarification_answer", "neighbor"],
+      "messages": [
+        {"role": "user", "content": "Что входит в КП?"},
+        {"role": "user", "content": "Ценный конечный продукт"}
+      ],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "list",
+        "intent": ["company_ckp", "company_identity"],
+        "operational_lookup": false,
+        "clarification": false,
+        "resolved_question": "Что входит в ценный конечный продукт?",
+        "is_follow_up": true,
+        "topic_changed": false,
+        "resolution_kind": "clarification_answer",
+        "inherited_slots": ["meaning_of_КП"],
+        "conversation_history_used": true,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["repeat_kp_clarification"]
+      }
+    },
+    {
+      "id": "CR10",
+      "group": "conversation_resolution",
+      "tags": ["conversation", "stage_3", "missing_slot", "neighbor"],
+      "messages": [
+        {"role": "user", "content": "Куда передать документы?"},
+        {"role": "user", "content": "Бухгалтерские"}
+      ],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "document_recipient",
+        "intent": ["document_flow", "roles_responsibility", "unknown"],
+        "operational_lookup": false,
+        "clarification": false,
+        "resolved_question": "Куда передать бухгалтерские документы?",
+        "is_follow_up": true,
+        "topic_changed": false,
+        "resolution_kind": "missing_slot_answer",
+        "inherited_slots": ["document_type"],
+        "conversation_history_used": true,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": []
+      }
+    },
+    {
+      "id": "CR11",
+      "group": "conversation_resolution",
+      "tags": ["conversation", "stage_3", "missing_slot", "neighbor"],
+      "messages": [
+        {"role": "user", "content": "Кто согласует заявление?"},
+        {"role": "user", "content": "На отпуск"}
+      ],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "responsible_person",
+        "intent": ["vacation", "document_flow", "roles_responsibility"],
+        "operational_lookup": false,
+        "clarification": false,
+        "resolved_question": "Кто согласует заявление на отпуск?",
+        "is_follow_up": true,
+        "topic_changed": false,
+        "resolution_kind": "missing_slot_answer",
+        "inherited_slots": ["application_type"],
+        "conversation_history_used": true,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["repeat_kp_clarification"]
+      }
+    },
+    {
+      "id": "CR12",
+      "group": "conversation_resolution",
+      "tags": ["conversation", "stage_3", "missing_slot", "neighbor"],
+      "messages": [
+        {"role": "user", "content": "Кто этим занимается?"},
+        {"role": "user", "content": "Рабочими местами"}
+      ],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "responsible_person",
+        "intent": "roles_responsibility",
+        "operational_lookup": false,
+        "clarification": false,
+        "resolved_question": "Кто занимается рабочими местами?",
+        "is_follow_up": true,
+        "topic_changed": false,
+        "resolution_kind": "missing_slot_answer",
+        "inherited_slots": ["subject"],
+        "conversation_history_used": true,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": []
       }
     }
   ]

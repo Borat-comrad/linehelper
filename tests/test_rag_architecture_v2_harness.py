@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from linehelper.llm.answer_generator import RagAnswerGenerator
-from linehelper.rag.query_analyzer import QueryPlan
+from linehelper.rag.query_analyzer import QueryPlan, fallback_query_plan
 from linehelper.rag.retriever import RetrievedChunk
 from scripts import rag_architecture_v2_harness as harness
 from scripts import run_rag_architecture_v2_baseline as baseline_runner
@@ -21,9 +21,10 @@ def test_fixture_loads_all_core_and_neighbor_cases() -> None:
     fixture = harness.load_fixture(FIXTURE_PATH)
     ids = {case["id"] for case in fixture["cases"]}
 
-    assert len(fixture["cases"]) == 51
+    assert len(fixture["cases"]) == 63
     assert {"T01", "T02", "T03", "T04", "T05A", "T05B", "T06", "T07", "T08", "T09"} <= ids
     assert len([case for case in fixture["cases"] if "paired" in case["tags"]]) == 8
+    assert {f"CR{index:02d}" for index in range(1, 13)} <= ids
 
 
 def test_fixture_rejects_duplicate_ids() -> None:
@@ -47,6 +48,14 @@ def test_fixture_forbids_exact_answer_golden_text() -> None:
     fixture["cases"][0]["expected"]["exact_answer"] = "Дословный ответ"
 
     with pytest.raises(harness.FixtureValidationError, match="exact-text"):
+        harness.validate_fixture(fixture)
+
+
+def test_fixture_rejects_unknown_resolution_kind() -> None:
+    fixture = harness.load_fixture(FIXTURE_PATH)
+    fixture["cases"][-1]["expected"]["resolution_kind"] = "guess"
+
+    with pytest.raises(harness.FixtureValidationError, match="resolution_kind"):
         harness.validate_fixture(fixture)
 
 
@@ -158,6 +167,11 @@ def test_multi_turn_evaluation_checks_each_turn_without_exact_assistant_text() -
         clarification=False,
     )
     diagnostic["resolved_question"] = "Как оформить коммерческое предложение?"
+    diagnostic["is_follow_up"] = True
+    diagnostic["topic_changed"] = False
+    diagnostic["resolution_kind"] = "clarification_answer"
+    diagnostic["inherited_slots"] = ["meaning_of_КП"]
+    diagnostic["conversation_history_used"] = True
     diagnostic["turns"] = [
         {
             "clarification": {
@@ -172,6 +186,11 @@ def test_multi_turn_evaluation_checks_each_turn_without_exact_assistant_text() -
             }
         },
         {
+            "resolved_question": "Как оформить коммерческое предложение?",
+            "is_follow_up": True,
+            "topic_changed": False,
+            "resolution_kind": "clarification_answer",
+            "inherited_slots": ["meaning_of_КП"],
             "clarification": {
                 "available": True,
                 "needed": False,
@@ -334,6 +353,70 @@ def test_safe_clarification_metrics_measure_rejection_and_retrieval() -> None:
     assert metrics["retrieval_started_after_rejected_clarification"]["rate"] == 1.0
 
 
+def test_conversation_metrics_measure_resolution_topic_and_stale_state() -> None:
+    cases = [_case("CR01"), _case("CR05"), _case("CR07")]
+    records = []
+    values = [
+        {
+            "case_id": "CR01",
+            "intent": "kp_commercial_offer",
+            "requested_fact_type": "procedure",
+            "resolved_question": "Как оформить коммерческое предложение?",
+            "is_follow_up": True,
+            "topic_changed": False,
+            "resolution_kind": "clarification_answer",
+            "inherited_slots": ["meaning_of_КП"],
+            "conversation_history_used": True,
+            "response_kind": "partial_answer",
+        },
+        {
+            "case_id": "CR05",
+            "intent": "roles_responsibility",
+            "requested_fact_type": "responsible_person",
+            "resolved_question": "Кто отвечает за таможню?",
+            "is_follow_up": False,
+            "topic_changed": True,
+            "resolution_kind": "topic_change",
+            "inherited_slots": [],
+            "conversation_history_used": True,
+            "response_kind": "no_answer",
+        },
+        {
+            "case_id": "CR07",
+            "intent": "roles_responsibility",
+            "requested_fact_type": "responsible_person",
+            "resolved_question": "Кто отвечает за рабочие места?",
+            "is_follow_up": False,
+            "topic_changed": False,
+            "resolution_kind": "standalone",
+            "inherited_slots": [],
+            "conversation_history_used": False,
+            "response_kind": "no_answer",
+        },
+    ]
+    for case, values_for_case in zip(cases, values, strict=True):
+        diagnostic = _diagnostic(
+            intent=values_for_case["intent"],
+            requested_fact_type=values_for_case["requested_fact_type"],
+            response_kind=values_for_case["response_kind"],
+            operational=False,
+            clarification=False,
+        )
+        diagnostic.update(values_for_case)
+        records.append(harness.apply_evaluation(case, diagnostic))
+
+    metrics = harness.aggregate_metrics(cases, records)
+
+    assert metrics["resolved_question_available_rate"]["rate"] == 1.0
+    assert metrics["resolved_question_accuracy"]["rate"] == 1.0
+    assert metrics["topic_change_accuracy"]["rate"] == 1.0
+    assert metrics["slot_inheritance_accuracy"]["rate"] == 1.0
+    assert metrics["stale_context_leak_count"] == 0
+    assert metrics["history_used_when_required"]["rate"] == 1.0
+    assert metrics["history_used_when_not_required"]["rate"] == 1.0
+    assert metrics["repeated_clarification_after_resolution"] == 0
+
+
 def test_generic_no_answer_metric_requires_stable_evidence_identity() -> None:
     cases = [_case("T06")]
     diagnostic = _diagnostic(
@@ -394,6 +477,30 @@ def test_repeatability_ignores_final_text_and_compares_architecture() -> None:
     repeatability = harness.build_repeatability([first, second])
 
     assert repeatability["T09"]["all_available_dimensions_stable"] is True
+
+
+def test_repeatability_compares_resolved_conversation_dimensions() -> None:
+    records = []
+    for answer in ("Первая формулировка", "Вторая формулировка"):
+        diagnostic = _diagnostic(answer=answer)
+        diagnostic.update(
+            {
+                "case_id": "CR01",
+                "resolved_question": "Как оформить коммерческое предложение?",
+                "resolution_kind": "clarification_answer",
+                "inherited_slots": ["meaning_of_КП"],
+                "topic_changed": False,
+            }
+        )
+        records.append(diagnostic)
+
+    repeatability = harness.build_repeatability(records)
+    dimensions = repeatability["CR01"]["dimensions"]
+
+    assert dimensions["resolved_question"]["stable"] is True
+    assert dimensions["resolution_kind"]["stable"] is True
+    assert dimensions["inherited_slots"]["stable"] is True
+    assert dimensions["topic_changed"]["stable"] is True
 
 
 def test_repeatability_detects_context_instability() -> None:
@@ -508,6 +615,33 @@ def test_deterministic_orchestration_operational_plan_rejects_semantic_noise() -
     assert result.response_kind == "no_answer"
     assert result.sources == []
     assert client.messages == []
+
+
+def test_live_runner_executes_multi_turn_case_with_history() -> None:
+    recording = harness.RecordingRetriever(StaticRetriever([]))
+    analyzer = FallbackAnalyzer()
+    generator = RagAnswerGenerator(
+        retriever=recording,
+        llm_client=FakeLlm("unused"),
+        query_analyzer=analyzer,
+    )
+
+    diagnostic = baseline_runner._run_full_case(
+        _case("CR01"),
+        repeat_index=1,
+        generator=generator,
+        retriever=recording,
+    )
+
+    assert len(diagnostic["turns"]) == 2
+    assert (
+        diagnostic["resolved_question"]
+        == "Как оформить коммерческое предложение?"
+    )
+    assert diagnostic["resolution_kind"] == "clarification_answer"
+    assert diagnostic["turns"][0]["clarification"]["needed"] is True
+    assert diagnostic["turns"][1]["clarification"]["needed"] is False
+    assert analyzer.questions[-1] == "Как оформить коммерческое предложение?"
 
 
 def test_live_runner_cli_supports_documented_parameters() -> None:
@@ -780,6 +914,17 @@ class StaticAnalyzer:
     def analyze(self, question: str) -> QueryPlan:
         self.questions.append(question)
         return self.plan
+
+
+class FallbackAnalyzer:
+    last_error = None
+
+    def __init__(self) -> None:
+        self.questions: list[str] = []
+
+    def analyze(self, question: str) -> QueryPlan:
+        self.questions.append(question)
+        return fallback_query_plan(question)
 
 
 class FakeLlm:

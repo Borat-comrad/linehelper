@@ -23,6 +23,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from linehelper.llm.answer_generator import (  # noqa: E402
     RagAnswerError,
     RagAnswerGenerator,
+    rag_answer_history_metadata,
 )
 from linehelper.llm.ollama_client import OllamaClient  # noqa: E402
 from linehelper.rag.query_analyzer import (  # noqa: E402
@@ -55,10 +56,6 @@ DEFAULT_OUTPUT_DIR = Path("data/test_runs/rag_architecture_v2")
 DEFAULT_RETRIEVAL_LIMIT = 5
 DEFAULT_CANDIDATE_LIMIT = 30
 OBSERVABILITY_GAPS = {
-    "resolved_question": (
-        "RagAnswerGenerator.answer() accepts only one question string and does not "
-        "expose conversation resolution"
-    ),
     "merged_candidates": (
         "RagAnswer exposes selected sources and excluded diagnostic candidates, "
         "but not the post-merge candidate sequence"
@@ -251,17 +248,20 @@ def _run_full_case(
     retriever: RecordingRetriever,
 ) -> dict[str, Any]:
     turns: list[dict[str, Any]] = []
-    executed_messages: list[dict[str, str]] = []
+    executed_messages: list[dict[str, Any]] = []
     for message in case["messages"]:
-        executed_messages.append(dict(message))
         if message["role"] != "user":
+            executed_messages.append(dict(message))
             continue
+        history = [dict(value) for value in executed_messages]
         retriever.reset()
         question = str(message["content"])
+        executed_messages.append(dict(message))
         started = time.monotonic()
         try:
             result = generator.answer(
                 question,
+                history=history,
                 retrieval_limit=DEFAULT_RETRIEVAL_LIMIT,
                 candidate_limit=DEFAULT_CANDIDATE_LIMIT,
             )
@@ -298,6 +298,9 @@ def _run_full_case(
         )
         query_plan = result.query_plan or unavailable(
             "RagAnswer did not expose QueryPlan diagnostics"
+        )
+        conversation = result.conversation or unavailable(
+            "RagAnswer did not expose conversation diagnostics"
         )
         intent = (
             query_plan.get("intent")
@@ -396,7 +399,46 @@ def _run_full_case(
             "repeat_index": repeat_index,
             "messages": [dict(value) for value in executed_messages],
             "original_question": question,
-            "resolved_question": unavailable(OBSERVABILITY_GAPS["resolved_question"]),
+            "resolved_question": (
+                result.resolved_question
+                if result.resolved_question
+                else unavailable("resolved question is absent from RagAnswer")
+            ),
+            "conversation": conversation,
+            "conversation_history_used": _conversation_value(
+                conversation,
+                "conversation_history_used",
+            ),
+            "conversation_turns_used": _conversation_value(
+                conversation,
+                "conversation_turns_used",
+            ),
+            "is_follow_up": _conversation_value(conversation, "is_follow_up"),
+            "topic_changed": _conversation_value(conversation, "topic_changed"),
+            "resolution_kind": _conversation_value(
+                conversation,
+                "resolution_kind",
+            ),
+            "inherited_slots": _conversation_value(
+                conversation,
+                "inherited_slots",
+            ),
+            "resolution_confidence": _conversation_value(
+                conversation,
+                "resolution_confidence",
+            ),
+            "resolution_reasons": _conversation_value(
+                conversation,
+                "resolution_reasons",
+            ),
+            "pending_clarification_before": _conversation_value(
+                conversation,
+                "pending_clarification_before",
+            ),
+            "pending_clarification_after": _conversation_value(
+                conversation,
+                "pending_clarification_after",
+            ),
             "query_plan": query_plan,
             "requested_fact_type": requested_fact_type,
             "raw_requested_fact_type": (
@@ -444,7 +486,13 @@ def _run_full_case(
             "failure_reasons": [],
         }
         turns.append(turn)
-        executed_messages.append({"role": "assistant", "content": result.answer})
+        executed_messages.append(
+            {
+                "role": "assistant",
+                "content": result.answer,
+                "metadata": rag_answer_history_metadata(result),
+            }
+        )
 
     if not turns:
         return _empty_diagnostic(
@@ -510,6 +558,35 @@ def _run_retrieval_only_case(
                 "messages": [dict(value) for value in case["messages"]],
                 "original_question": question,
                 "resolved_question": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "conversation": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "conversation_history_used": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "conversation_turns_used": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "is_follow_up": unavailable("not executed in retrieval-only mode"),
+                "topic_changed": unavailable("not executed in retrieval-only mode"),
+                "resolution_kind": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "inherited_slots": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "resolution_confidence": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "resolution_reasons": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "pending_clarification_before": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "pending_clarification_after": unavailable(
                     "not executed in retrieval-only mode"
                 ),
                 "query_plan": unavailable("not executed in retrieval-only mode"),
@@ -604,6 +681,17 @@ def _empty_diagnostic(
         "messages": [dict(value) for value in messages],
         "original_question": original_question,
         "resolved_question": marker,
+        "conversation": marker,
+        "conversation_history_used": marker,
+        "conversation_turns_used": marker,
+        "is_follow_up": marker,
+        "topic_changed": marker,
+        "resolution_kind": marker,
+        "inherited_slots": marker,
+        "resolution_confidence": marker,
+        "resolution_reasons": marker,
+        "pending_clarification_before": marker,
+        "pending_clarification_after": marker,
         "query_plan": marker,
         "requested_fact_type": marker,
         "raw_requested_fact_type": marker,
@@ -781,6 +869,12 @@ def _display(value: Any) -> str:
     if isinstance(value, dict) and value.get("available") is False:
         return "not_available"
     return str(value)
+
+
+def _conversation_value(conversation: Any, key: str) -> Any:
+    if isinstance(conversation, dict) and key in conversation:
+        return conversation[key]
+    return unavailable(f"{key} is absent from conversation diagnostics")
 
 
 def _configure_stdout() -> None:

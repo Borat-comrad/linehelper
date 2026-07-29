@@ -5,13 +5,22 @@ from __future__ import annotations
 import os
 import re
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from linehelper.llm.ollama_client import OllamaClient, OllamaError
 from linehelper.rag.prompt_builder import build_rag_prompt
+from linehelper.rag.conversation_resolver import (
+    ConversationContext,
+    ConversationResolver,
+    ConversationTurn,
+    PendingClarification,
+    assistant_history_metadata,
+    conversation_diagnostics,
+    pending_clarification_from_plan,
+)
 from linehelper.rag.retriever import RetrievedChunk, SemanticRetriever
 
 if TYPE_CHECKING:
@@ -272,6 +281,17 @@ class RagAnswer:
     diagnostic_candidates: list[RagSource]
     response_kind: str = "answer"
     query_plan: dict[str, Any] | None = None
+    resolved_question: str | None = None
+    conversation: dict[str, Any] | None = None
+
+
+def rag_answer_history_metadata(result: RagAnswer) -> dict[str, Any]:
+    """Return compact structured state to store with an assistant chat turn."""
+    return assistant_history_metadata(
+        conversation=result.conversation,
+        query_plan=result.query_plan,
+        response_kind=result.response_kind,
+    )
 
 
 @dataclass(frozen=True)
@@ -296,10 +316,12 @@ class RagAnswerGenerator:
         context_limit: int | None = None,
         context_score_ratio: float | None = None,
         query_analyzer: QueryAnalyzerClient | None = None,
+        conversation_resolver: ConversationResolver | None = None,
     ) -> None:
         self.retriever = retriever or SemanticRetriever(db_path)
         self.llm_client = llm_client or OllamaClient()
         self.query_analyzer = query_analyzer
+        self.conversation_resolver = conversation_resolver or ConversationResolver()
         self.context_limit = max(
             1,
             context_limit
@@ -317,6 +339,8 @@ class RagAnswerGenerator:
         self,
         question: str,
         *,
+        history: Sequence[ConversationTurn | Mapping[str, Any]] | None = None,
+        conversation_context: ConversationContext | None = None,
         retrieval_limit: int = DEFAULT_RETRIEVAL_LIMIT,
         candidate_limit: int = DEFAULT_CANDIDATE_LIMIT,
     ) -> RagAnswer:
@@ -326,12 +350,51 @@ class RagAnswerGenerator:
             raise ValueError("question must not be empty")
 
         started_at = time.monotonic()
-        query_analysis = self._analyze_query(clean_question)
+        resolved = self.conversation_resolver.resolve(
+            clean_question,
+            history=history,
+            conversation_context=conversation_context,
+        )
+        resolved_question = resolved.resolved_question
+
+        if (
+            resolved.resolution_kind == "unresolved_follow_up"
+            and resolved.pending_clarification_before is not None
+        ):
+            pending = resolved.pending_clarification_before
+            query_plan_diagnostics = _pending_clarification_diagnostics(pending)
+            return RagAnswer(
+                question=clean_question,
+                answer=pending.plan.question or clean_question,
+                model=self.llm_client.model,
+                sources=[],
+                chunks_used=0,
+                prompt_length=0,
+                elapsed_seconds=round(time.monotonic() - started_at, 3),
+                retrieval_limit=retrieval_limit,
+                candidate_limit=candidate_limit,
+                context_limit=self.context_limit,
+                context_score_ratio=self.context_score_ratio,
+                diagnostic_candidates=[],
+                response_kind="clarification",
+                query_plan=query_plan_diagnostics,
+                resolved_question=resolved_question,
+                conversation=conversation_diagnostics(
+                    resolved,
+                    pending_after=pending,
+                ),
+            )
+
+        query_analysis = self._analyze_query(resolved_question)
         query_plan = query_analysis.plan
         query_plan_diagnostics = query_analysis.diagnostics
 
         clarification = _query_plan_clarification(query_plan)
         if clarification is not None:
+            pending_after = pending_clarification_from_plan(
+                resolved_question,
+                query_plan.clarification if query_plan is not None else None,
+            )
             return RagAnswer(
                 question=clean_question,
                 answer=clarification,
@@ -347,18 +410,27 @@ class RagAnswerGenerator:
                 diagnostic_candidates=[],
                 response_kind="clarification",
                 query_plan=query_plan_diagnostics,
+                resolved_question=resolved_question,
+                conversation=conversation_diagnostics(
+                    resolved,
+                    pending_after=pending_after,
+                ),
             )
 
-        intent = _runtime_query_intent(clean_question, query_plan)
+        conversation_result = conversation_diagnostics(
+            resolved,
+            pending_after=None,
+        )
+        intent = _runtime_query_intent(resolved_question, query_plan)
         chunks = self._retrieve_with_query_plan(
-            clean_question,
+            resolved_question,
             query_plan=query_plan,
             retrieval_limit=retrieval_limit,
             candidate_limit=candidate_limit,
         )
         chunks = _boost_organization_chunks(
             chunks,
-            clean_question,
+            resolved_question,
             intent=intent,
         )
         if intent.name == "kp_commercial_offer":
@@ -381,6 +453,8 @@ class RagAnswerGenerator:
                 ],
                 response_kind="partial_answer",
                 query_plan=query_plan_diagnostics,
+                resolved_question=resolved_question,
+                conversation=conversation_result,
             )
         if intent.name == "comparison":
             chunks = sorted(
@@ -388,7 +462,7 @@ class RagAnswerGenerator:
                     [
                         *chunks,
                         *self._retrieve_comparison_candidates(
-                            clean_question,
+                            resolved_question,
                             candidate_limit=candidate_limit,
                         ),
                     ]
@@ -397,7 +471,7 @@ class RagAnswerGenerator:
                 reverse=True,
             )
         selected_context_chunks = select_context_chunks(
-            clean_question,
+            resolved_question,
             chunks,
             intent=intent,
             max_chunks=self.context_limit,
@@ -406,7 +480,7 @@ class RagAnswerGenerator:
         context_chunks = (
             selected_context_chunks
             if has_sufficient_context(
-                clean_question,
+                resolved_question,
                 selected_context_chunks,
                 intent=intent,
             )
@@ -435,9 +509,11 @@ class RagAnswerGenerator:
                 diagnostic_candidates=diagnostic_candidates,
                 response_kind="no_answer",
                 query_plan=query_plan_diagnostics,
+                resolved_question=resolved_question,
+                conversation=conversation_result,
             )
 
-        prompt = build_rag_prompt(clean_question, context_chunks)
+        prompt = build_rag_prompt(resolved_question, context_chunks)
         messages = [
             {"role": "system", "content": SYSTEM_MESSAGE},
             {"role": "user", "content": prompt},
@@ -466,6 +542,8 @@ class RagAnswerGenerator:
             context_score_ratio=self.context_score_ratio,
             diagnostic_candidates=diagnostic_candidates,
             query_plan=query_plan_diagnostics,
+            resolved_question=resolved_question,
+            conversation=conversation_result,
         )
 
     def _retrieve_comparison_candidates(
@@ -622,6 +700,50 @@ def _query_plan_error_diagnostics(exc: Exception) -> dict[str, Any]:
         "enabled": True,
         "error": f"{type(exc).__name__}: {exc}",
         "fallback_used": True,
+    }
+
+
+def _pending_clarification_diagnostics(
+    pending: PendingClarification,
+) -> dict[str, Any]:
+    """Expose an existing validated clarification without re-running analysis."""
+    plan = pending.plan
+    return {
+        "enabled": True,
+        "intent": "unknown",
+        "raw_intent": None,
+        "answer_type": "clarification",
+        "requested_fact_type": "unknown",
+        "raw_requested_fact_type": None,
+        "temporal_scope": "unknown",
+        "raw_temporal_scope": None,
+        "subject": "",
+        "raw_subject": None,
+        "operational_lookup": False,
+        "operational_decision_reason": "pending_clarification_not_resolved",
+        "query_plan_validation_reasons": [],
+        "needs_clarification": True,
+        "clarification_question": plan.question,
+        "raw_clarification_required": False,
+        "validated_clarification_required": True,
+        "raw_clarification_kind": "none",
+        "validated_clarification_kind": plan.kind,
+        "raw_ambiguity_span": None,
+        "validated_ambiguity_span": plan.ambiguity_span,
+        "raw_candidate_meanings": [],
+        "validated_candidate_meanings": list(plan.candidate_meanings),
+        "raw_missing_slots": [],
+        "validated_missing_slots": list(plan.missing_slots),
+        "raw_clarification_question": None,
+        "validated_clarification_question": plan.question,
+        "clarification_action": "clarify",
+        "clarification_validation_reasons": [
+            "pending_clarification_answer_not_resolved"
+        ],
+        "normalized_question": pending.source_question,
+        "query_expansions": [],
+        "preferred_sources": [],
+        "confidence": plan.confidence,
     }
 
 

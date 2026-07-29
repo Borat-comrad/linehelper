@@ -12,7 +12,13 @@ from typing import Sequence
 
 from linehelper import __version__
 from linehelper.config import LineHelperConfig, LineHelperConfigError, load_config
-from linehelper.llm.answer_generator import RagAnswerError, RagAnswerGenerator
+from linehelper.llm.answer_generator import (
+    RagAnswer,
+    RagAnswerError,
+    RagAnswerGenerator,
+    rag_answer_history_metadata,
+)
+from linehelper.rag.conversation_resolver import ConversationSession
 from linehelper.runtime.doctor import (
     get_database_stats,
     get_ollama_status,
@@ -75,9 +81,17 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     subparsers.add_parser("status", help="Показать состояние LineHelper.")
     subparsers.add_parser("doctor", help="Проверить окружение LineHelper.")
 
-    chat = subparsers.add_parser("chat", help="Задать один вопрос через основной RAG pipeline.")
+    chat = subparsers.add_parser(
+        "chat",
+        help="Задать вопрос или начать интерактивный диалог через основной RAG pipeline.",
+    )
     chat.add_argument("--debug", action="store_true", help="Показать диагностику Query Analyzer и retrieval.")
-    chat.add_argument("question", help="Вопрос для LineHelper.")
+    chat.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Запустить диалог; без question интерактивный режим включается автоматически.",
+    )
+    chat.add_argument("question", nargs="?", help="Вопрос для LineHelper.")
 
     index = subparsers.add_parser("index", help="Команды индексации.")
     index_subparsers = index.add_subparsers(dest="index_command")
@@ -164,7 +178,15 @@ def _command_doctor(config: LineHelperConfig) -> int:
 def _command_chat(args: argparse.Namespace, config: LineHelperConfig) -> int:
     try:
         generator = RagAnswerGenerator(db_path=config.db_path)
-        result = generator.answer(args.question)
+    except Exception as exc:
+        print(f"Не удалось инициализировать RAG: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+
+    if args.interactive or args.question is None:
+        return _interactive_chat(generator, debug=bool(args.debug))
+
+    try:
+        result = generator.answer(str(args.question))
     except (ValueError, RagAnswerError) as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 1
@@ -172,6 +194,50 @@ def _command_chat(args: argparse.Namespace, config: LineHelperConfig) -> int:
         print(f"Не удалось выполнить вопрос: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
+    _print_chat_result(result, debug=bool(args.debug))
+    return 0
+
+
+def _interactive_chat(generator: RagAnswerGenerator, *, debug: bool) -> int:
+    """Run one in-memory dialog without persisting it between CLI processes."""
+    session = ConversationSession()
+    print("Интерактивный LineHelper. Команды: /new — новый диалог, /exit — выход.")
+    while True:
+        try:
+            question = input("Вы: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not question:
+            continue
+        if question.casefold() in {"/exit", "/quit"}:
+            return 0
+        if question.casefold() == "/new":
+            session.reset()
+            print("История текущего диалога очищена.")
+            continue
+        try:
+            result = generator.answer(question, history=session.messages)
+        except (ValueError, RagAnswerError) as exc:
+            print(f"Ошибка: {exc}", file=sys.stderr)
+            continue
+        except Exception as exc:
+            print(
+                f"Не удалось выполнить вопрос: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+
+        _print_chat_result(result, debug=debug)
+        session.append_exchange(
+            question,
+            result.answer,
+            assistant_metadata=rag_answer_history_metadata(result),
+        )
+
+
+def _print_chat_result(result: RagAnswer, *, debug: bool) -> None:
+    """Render one completed answer for one-shot and interactive modes."""
     print(f"Вопрос: {result.question}")
     print()
     print(f"Ответ: {result.answer}")
@@ -192,10 +258,28 @@ def _command_chat(args: argparse.Namespace, config: LineHelperConfig) -> int:
     else:
         print("-")
 
-    if args.debug:
+    if debug:
         query_plan = result.query_plan or {}
+        conversation = result.conversation or {}
         print()
         print("Debug:")
+        print(f"original question: {conversation.get('original_question') or result.question}")
+        print(
+            "resolved question: "
+            f"{conversation.get('resolved_question') or result.resolved_question or '-'}"
+        )
+        print(
+            "conversation history used: "
+            f"{conversation.get('conversation_history_used', False)}"
+        )
+        print(f"is follow-up: {conversation.get('is_follow_up', False)}")
+        print(f"topic changed: {conversation.get('topic_changed', False)}")
+        print(f"resolution kind: {conversation.get('resolution_kind') or '-'}")
+        print(f"inherited slots: {_join(conversation.get('inherited_slots'))}")
+        print(
+            "resolution reasons: "
+            f"{_join(conversation.get('resolution_reasons'))}"
+        )
         print(f"intent: {query_plan.get('intent') or '-'}")
         print(f"raw intent: {query_plan.get('raw_intent') or '-'}")
         print(f"requested fact type: {query_plan.get('requested_fact_type') or '-'}")
@@ -244,7 +328,6 @@ def _command_chat(args: argparse.Namespace, config: LineHelperConfig) -> int:
         print(f"found chunks: {result.chunks_used}")
         print(f"diagnostic chunks: {len(result.diagnostic_candidates)}")
         print(f"elapsed seconds: {result.elapsed_seconds}")
-    return 0
 
 
 def _command_index(args: argparse.Namespace, config: LineHelperConfig) -> int:

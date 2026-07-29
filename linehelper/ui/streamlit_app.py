@@ -13,7 +13,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from linehelper.llm.answer_generator import RagAnswerError, RagAnswerGenerator  # noqa: E402
+from linehelper.llm.answer_generator import (  # noqa: E402
+    RagAnswerError,
+    RagAnswerGenerator,
+    rag_answer_history_metadata,
+)
 from linehelper.ui.components import badge_html, source_card_html  # noqa: E402
 from linehelper.ui.styles import APP_CSS  # noqa: E402
 
@@ -71,8 +75,7 @@ def main() -> None:
 
 
 def _init_session_state() -> None:
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+    st.session_state.setdefault("messages", [])
 
 
 def _render_sidebar() -> UiSettings:
@@ -103,6 +106,11 @@ def _render_sidebar() -> UiSettings:
         st.caption(
             "Веса semantic/episodic пока не настраиваются: текущий MVP читает "
             "semantic memory, а UI уже готов различать namespaces."
+        )
+        st.button(
+            "Новый диалог",
+            on_click=_reset_conversation_state,
+            width="stretch",
         )
 
         st.markdown("### Статус")
@@ -179,7 +187,7 @@ def _render_chat_history(settings: UiSettings) -> None:
 
 
 def _handle_question(question: str, settings: UiSettings) -> None:
-    st.session_state.messages.append({"role": "user", "content": question})
+    history = _history_for_answer(st.session_state.messages)
     with st.chat_message("user"):
         st.markdown(question)
 
@@ -188,6 +196,7 @@ def _handle_question(question: str, settings: UiSettings) -> None:
             with st.spinner("Ищу источники и спрашиваю локальную модель..."):
                 result = st.session_state.generator.answer(
                     question,
+                    history=history,
                     retrieval_limit=settings.retrieval_limit,
                     candidate_limit=settings.candidate_limit,
                 )
@@ -204,9 +213,38 @@ def _handle_question(question: str, settings: UiSettings) -> None:
         st.markdown(result.answer)
         _render_result_details(result, settings)
 
-    st.session_state.messages.append(
-        {"role": "assistant", "content": result.answer, "result": result}
-    )
+    st.session_state.messages.append({"role": "user", "content": question})
+    st.session_state.messages.append(_assistant_message(result))
+
+
+def _history_for_answer(messages: list[dict]) -> list[dict]:
+    """Copy completed turns without duplicating the current user message."""
+    history: list[dict] = []
+    for message in messages:
+        item = {
+            "role": message.get("role"),
+            "content": message.get("content"),
+        }
+        metadata = message.get("metadata")
+        if isinstance(metadata, dict):
+            item["metadata"] = dict(metadata)
+        history.append(item)
+    return history
+
+
+def _assistant_message(result) -> dict:
+    """Store display data together with structured resolver metadata."""
+    return {
+        "role": "assistant",
+        "content": result.answer,
+        "metadata": rag_answer_history_metadata(result),
+        "result": result,
+    }
+
+
+def _reset_conversation_state() -> None:
+    """Clear both displayed turns and structured clarification state."""
+    st.session_state.messages = []
 
 
 def _chat_placeholder(mode: str) -> str:
@@ -249,6 +287,8 @@ def _render_result_details(result, settings: UiSettings) -> None:
                 "context_limit": result.context_limit,
                 "context_score_ratio": result.context_score_ratio,
                 "response_kind": result.response_kind,
+                "resolved_question": result.resolved_question,
+                "conversation": result.conversation,
                 "query_plan": result.query_plan,
             }
         )
