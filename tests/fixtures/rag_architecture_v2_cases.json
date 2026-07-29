@@ -29,7 +29,16 @@
         "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
         "forbidden_behaviors": ["repeat_kp_clarification", "invent_missing_instruction"],
         "turns": [
-          {"turn": 1, "clarification": true, "ambiguity_span": "КП"},
+          {
+            "turn": 1,
+            "clarification": true,
+            "clarification_kind": "abbreviation",
+            "ambiguity_span": "КП",
+            "candidate_meanings": [
+              "коммерческое предложение",
+              "ценный конечный продукт"
+            ]
+          },
           {"turn": 2, "clarification": false}
         ]
       }
@@ -43,7 +52,7 @@
       ],
       "expected": {
         "answerability": "full",
-        "requested_fact_type": "policy_list",
+        "requested_fact_type": "list",
         "intent": "document_flow",
         "operational_lookup": false,
         "clarification": false,
@@ -98,7 +107,7 @@
       ],
       "expected": {
         "answerability": "partial",
-        "requested_fact_type": "named_recipient",
+        "requested_fact_type": "document_recipient",
         "intent": "business_trip",
         "operational_lookup": false,
         "clarification": false,
@@ -129,7 +138,7 @@
       ],
       "expected": {
         "answerability": "full",
-        "requested_fact_type": "procedure_and_deadline",
+        "requested_fact_type": "procedure",
         "intent": "vacation",
         "operational_lookup": false,
         "clarification": false,
@@ -207,7 +216,7 @@
       ],
       "expected": {
         "answerability": "partial",
-        "requested_fact_type": "compound_responsibility",
+        "requested_fact_type": "responsible_person",
         "intent": "roles_responsibility",
         "operational_lookup": false,
         "clarification": false,
@@ -267,7 +276,7 @@
       ],
       "expected": {
         "answerability": "full",
-        "requested_fact_type": "normative_rule",
+        "requested_fact_type": "procedure",
         "intent": "order_disposition",
         "operational_lookup": false,
         "clarification": false,
@@ -293,15 +302,15 @@
       "pair_id": "order_owner_vs_status",
       "messages": [{"role": "user", "content": "Кто отвечает за заказ?"}],
       "expected": {
-        "answerability": "clarification",
+        "answerability": "partial",
         "requested_fact_type": "responsible_person",
         "intent": ["roles_responsibility", "unknown"],
         "operational_lookup": false,
-        "clarification": true,
-        "final_modes": ["clarification"],
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
         "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
         "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
-        "forbidden_behaviors": ["route_to_one_c", "random_organization_answer"]
+        "forbidden_behaviors": ["route_to_one_c"]
       }
     },
     {
@@ -329,12 +338,12 @@
       "pair_id": "shipping_owner_vs_status",
       "messages": [{"role": "user", "content": "Кто отвечает за отгрузку?"}],
       "expected": {
-        "answerability": "clarification",
+        "answerability": "partial",
         "requested_fact_type": "responsible_person",
         "intent": "roles_responsibility",
         "operational_lookup": false,
-        "clarification": true,
-        "final_modes": ["clarification", "partial_answer"],
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
         "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
         "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
         "forbidden_behaviors": ["route_to_one_c"]
@@ -384,7 +393,7 @@
       "messages": [{"role": "user", "content": "Что сейчас есть на складе?"}],
       "expected": {
         "answerability": "operational",
-        "requested_fact_type": "inventory_status",
+        "requested_fact_type": "availability",
         "intent": "one_c_operational_lookup",
         "operational_lookup": true,
         "clarification": false,
@@ -405,11 +414,11 @@
         "requested_fact_type": "responsible_person",
         "intent": "roles_responsibility",
         "operational_lookup": false,
-        "clarification": true,
-        "final_modes": ["clarification", "partial_answer"],
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
         "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
         "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
-        "forbidden_behaviors": ["route_to_one_c", "random_organization_answer"]
+        "forbidden_behaviors": ["route_to_one_c"]
       }
     },
     {
@@ -420,7 +429,7 @@
       "messages": [{"role": "user", "content": "Оплачен ли счёт №123?"}],
       "expected": {
         "answerability": "operational",
-        "requested_fact_type": "payment_status",
+        "requested_fact_type": "current_status",
         "intent": "one_c_operational_lookup",
         "operational_lookup": true,
         "clarification": false,
@@ -438,10 +447,12 @@
       "messages": [{"role": "user", "content": "Кому отдать документы?"}],
       "expected": {
         "answerability": "clarification",
-        "requested_fact_type": "named_recipient",
+        "requested_fact_type": "document_recipient",
         "intent": ["unknown", "document_flow"],
         "operational_lookup": false,
         "clarification": true,
+        "clarification_kind": "missing_document_type",
+        "missing_slots": ["document_type"],
         "final_modes": ["clarification"],
         "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
         "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
@@ -459,6 +470,8 @@
         "intent": "unknown",
         "operational_lookup": false,
         "clarification": true,
+        "clarification_kind": "missing_subject",
+        "missing_slots": ["subject"],
         "final_modes": ["clarification"],
         "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
         "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
@@ -508,7 +521,7 @@
       "messages": [{"role": "user", "content": "К кому идти за новым компьютером?"}],
       "expected": {
         "answerability": "partial",
-        "requested_fact_type": "responsible_person",
+        "requested_fact_type": "primary_contact",
         "intent": ["roles_responsibility", "equipment_it_request"],
         "operational_lookup": false,
         "clarification": false,
@@ -526,7 +539,7 @@
       "messages": [{"role": "user", "content": "Кто главный по рабочим местам?"}],
       "expected": {
         "answerability": "full",
-        "requested_fact_type": "responsible_person",
+        "requested_fact_type": "unit_head",
         "intent": "roles_responsibility",
         "operational_lookup": false,
         "clarification": false,
@@ -544,10 +557,12 @@
       "messages": [{"role": "user", "content": "Кому отдать бумаги?"}],
       "expected": {
         "answerability": "clarification",
-        "requested_fact_type": "named_recipient",
+        "requested_fact_type": "document_recipient",
         "intent": "unknown",
         "operational_lookup": false,
         "clarification": true,
+        "clarification_kind": "missing_document_type",
+        "missing_slots": ["document_type"],
         "final_modes": ["clarification"],
         "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
         "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
@@ -565,6 +580,8 @@
         "intent": "unknown",
         "operational_lookup": false,
         "clarification": true,
+        "clarification_kind": "missing_subject",
+        "missing_slots": ["subject"],
         "final_modes": ["clarification"],
         "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
         "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
@@ -577,15 +594,15 @@
       "tags": ["conversation_style", "responsibility"],
       "messages": [{"role": "user", "content": "Кто выпускает заказ клиенту?"}],
       "expected": {
-        "answerability": "clarification",
+        "answerability": "partial",
         "requested_fact_type": "responsible_person",
         "intent": "roles_responsibility",
         "operational_lookup": false,
-        "clarification": true,
-        "final_modes": ["clarification", "partial_answer"],
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
         "required_retrieval": {"sources": ["bvr_company_structure_instruction_v2 (2).txt"], "record_keys": [], "chunk_ids": []},
         "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
-        "forbidden_behaviors": ["route_to_one_c", "random_organization_answer"]
+        "forbidden_behaviors": ["route_to_one_c"]
       }
     },
     {
@@ -595,7 +612,7 @@
       "messages": [{"role": "user", "content": "К кому обращаться по доставке клиенту?"}],
       "expected": {
         "answerability": "full",
-        "requested_fact_type": "responsible_person",
+        "requested_fact_type": "primary_contact",
         "intent": "roles_responsibility",
         "operational_lookup": false,
         "clarification": false,
@@ -631,7 +648,7 @@
       "messages": [{"role": "user", "content": "Что у нас по документообороту?"}],
       "expected": {
         "answerability": "full",
-        "requested_fact_type": "policy_list",
+        "requested_fact_type": "list",
         "intent": "document_flow",
         "operational_lookup": false,
         "clarification": false,
@@ -666,7 +683,7 @@
       "messages": [{"role": "user", "content": "Есть ли новый компьютер в наличии?"}],
       "expected": {
         "answerability": "operational",
-        "requested_fact_type": "inventory_status",
+        "requested_fact_type": "availability",
         "intent": "one_c_operational_lookup",
         "operational_lookup": true,
         "clarification": false,
@@ -674,6 +691,348 @@
         "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
         "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
         "forbidden_behaviors": ["invent_inventory", "semantic_procedure_as_current_inventory"]
+      }
+    },
+    {
+      "id": "SC_OR01",
+      "group": "safe_clarification_order_disposition",
+      "tags": ["safe_clarification", "neighbor", "clarification_negative"],
+      "messages": [{"role": "user", "content": "Можно ли отдавать распоряжения устно?"}],
+      "expected": {
+        "answerability": "full",
+        "requested_fact_type": "procedure",
+        "intent": "order_disposition",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer"],
+        "required_retrieval": {"sources": ["ИП-0005 Распоряжения"], "record_keys": [], "chunk_ids": [67]},
+        "required_context": {"sources": ["ИП-0005 Распоряжения"], "record_keys": [], "chunk_ids": [67]},
+        "forbidden_behaviors": ["kp_ckp_clarification", "generic_no_answer"]
+      }
+    },
+    {
+      "id": "SC_OR02",
+      "group": "safe_clarification_order_disposition",
+      "tags": ["safe_clarification", "neighbor", "clarification_negative"],
+      "messages": [{"role": "user", "content": "Руководитель может дать устное распоряжение?"}],
+      "expected": {
+        "answerability": "full",
+        "requested_fact_type": "procedure",
+        "intent": "order_disposition",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer"],
+        "required_retrieval": {"sources": ["ИП-0005 Распоряжения"], "record_keys": [], "chunk_ids": [67]},
+        "required_context": {"sources": ["ИП-0005 Распоряжения"], "record_keys": [], "chunk_ids": [67]},
+        "forbidden_behaviors": ["kp_ckp_clarification", "generic_no_answer"]
+      }
+    },
+    {
+      "id": "SC_OR03",
+      "group": "safe_clarification_order_disposition",
+      "tags": ["safe_clarification", "neighbor", "clarification_negative"],
+      "messages": [{"role": "user", "content": "Нужно ли письменно фиксировать распоряжение?"}],
+      "expected": {
+        "answerability": "full",
+        "requested_fact_type": "procedure",
+        "intent": "order_disposition",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer"],
+        "required_retrieval": {"sources": ["ИП-0005 Распоряжения"], "record_keys": [], "chunk_ids": [67]},
+        "required_context": {"sources": ["ИП-0005 Распоряжения"], "record_keys": [], "chunk_ids": [67]},
+        "forbidden_behaviors": ["kp_ckp_clarification", "generic_no_answer"]
+      }
+    },
+    {
+      "id": "SC_OR04",
+      "group": "safe_clarification_order_disposition",
+      "tags": ["safe_clarification", "neighbor", "clarification_negative"],
+      "messages": [{"role": "user", "content": "Что делать после устного распоряжения руководителя?"}],
+      "expected": {
+        "answerability": "full",
+        "requested_fact_type": "procedure",
+        "intent": "order_disposition",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer"],
+        "required_retrieval": {"sources": ["ИП-0005 Распоряжения"], "record_keys": [], "chunk_ids": [67]},
+        "required_context": {"sources": ["ИП-0005 Распоряжения"], "record_keys": [], "chunk_ids": [67]},
+        "forbidden_behaviors": ["kp_ckp_clarification", "generic_no_answer"]
+      }
+    },
+    {
+      "id": "SC_OR05",
+      "group": "safe_clarification_order_disposition",
+      "tags": ["safe_clarification", "neighbor", "clarification_negative"],
+      "messages": [{"role": "user", "content": "Допустимо ли распоряжение без письменной фиксации?"}],
+      "expected": {
+        "answerability": "full",
+        "requested_fact_type": "procedure",
+        "intent": "order_disposition",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer"],
+        "required_retrieval": {"sources": ["ИП-0005 Распоряжения"], "record_keys": [], "chunk_ids": [67]},
+        "required_context": {"sources": ["ИП-0005 Распоряжения"], "record_keys": [], "chunk_ids": [67]},
+        "forbidden_behaviors": ["kp_ckp_clarification", "generic_no_answer"]
+      }
+    },
+    {
+      "id": "SC_KP01",
+      "group": "safe_clarification_kp",
+      "tags": ["safe_clarification", "neighbor", "clarification"],
+      "messages": [{"role": "user", "content": "Как оформить КП?"}],
+      "expected": {
+        "answerability": "clarification",
+        "requested_fact_type": "procedure",
+        "intent": "ambiguous_abbreviation",
+        "operational_lookup": false,
+        "clarification": true,
+        "clarification_kind": "abbreviation",
+        "ambiguity_span": "КП",
+        "candidate_meanings": ["коммерческое предложение", "ценный конечный продукт"],
+        "final_modes": ["clarification"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": []
+      }
+    },
+    {
+      "id": "SC_KP02",
+      "group": "safe_clarification_kp",
+      "tags": ["safe_clarification", "neighbor", "clarification"],
+      "messages": [{"role": "user", "content": "Кто готовит КП?"}],
+      "expected": {
+        "answerability": "clarification",
+        "requested_fact_type": "responsible_person",
+        "intent": "ambiguous_abbreviation",
+        "operational_lookup": false,
+        "clarification": true,
+        "clarification_kind": "abbreviation",
+        "ambiguity_span": "КП",
+        "candidate_meanings": ["коммерческое предложение", "ценный конечный продукт"],
+        "final_modes": ["clarification"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": []
+      }
+    },
+    {
+      "id": "SC_KP03",
+      "group": "safe_clarification_kp",
+      "tags": ["safe_clarification", "neighbor", "clarification"],
+      "messages": [{"role": "user", "content": "Где найти КП?"}],
+      "expected": {
+        "answerability": "clarification",
+        "requested_fact_type": "unknown",
+        "intent": "ambiguous_abbreviation",
+        "operational_lookup": false,
+        "clarification": true,
+        "clarification_kind": "abbreviation",
+        "ambiguity_span": "КП",
+        "candidate_meanings": ["коммерческое предложение", "ценный конечный продукт"],
+        "final_modes": ["clarification"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": []
+      }
+    },
+    {
+      "id": "SC_KP04",
+      "group": "safe_clarification_kp",
+      "tags": ["safe_clarification", "neighbor", "clarification"],
+      "messages": [{"role": "user", "content": "КП уже согласовано?"}],
+      "expected": {
+        "answerability": "clarification",
+        "requested_fact_type": "current_value",
+        "intent": "ambiguous_abbreviation",
+        "operational_lookup": false,
+        "clarification": true,
+        "clarification_kind": "abbreviation",
+        "ambiguity_span": "КП",
+        "candidate_meanings": ["коммерческое предложение", "ценный конечный продукт"],
+        "final_modes": ["clarification"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": []
+      }
+    },
+    {
+      "id": "SC_KP05",
+      "group": "safe_clarification_kp",
+      "tags": ["safe_clarification", "neighbor", "clarification"],
+      "messages": [{"role": "user", "content": "Что входит в КП?"}],
+      "expected": {
+        "answerability": "clarification",
+        "requested_fact_type": "unknown",
+        "intent": "ambiguous_abbreviation",
+        "operational_lookup": false,
+        "clarification": true,
+        "clarification_kind": "abbreviation",
+        "ambiguity_span": "КП",
+        "candidate_meanings": ["коммерческое предложение", "ценный конечный продукт"],
+        "final_modes": ["clarification"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": []
+      }
+    },
+    {
+      "id": "SC_DOC01",
+      "group": "safe_clarification_documents",
+      "tags": ["safe_clarification", "neighbor", "clarification_negative"],
+      "messages": [{"role": "user", "content": "Куда передать оригиналы кадровых документов?"}],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "document_recipient",
+        "intent": ["document_flow", "roles_responsibility", "unknown"],
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["kp_ckp_clarification"]
+      }
+    },
+    {
+      "id": "SC_DOC02",
+      "group": "safe_clarification_documents",
+      "tags": ["safe_clarification", "neighbor", "clarification_negative"],
+      "messages": [{"role": "user", "content": "Кто отвечает за ЭДО?"}],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "responsible_person",
+        "intent": "roles_responsibility",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["kp_ckp_clarification"]
+      }
+    },
+    {
+      "id": "SC_DOC03",
+      "group": "safe_clarification_documents",
+      "tags": ["safe_clarification", "neighbor", "clarification_negative"],
+      "messages": [{"role": "user", "content": "Кому направить бухгалтерские документы?"}],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "document_recipient",
+        "intent": ["document_flow", "roles_responsibility", "unknown"],
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["kp_ckp_clarification"]
+      }
+    },
+    {
+      "id": "SC_DOC04",
+      "group": "safe_clarification_documents",
+      "tags": ["safe_clarification", "neighbor", "clarification_negative"],
+      "messages": [{"role": "user", "content": "Кто занимается внутренним документооборотом?"}],
+      "expected": {
+        "answerability": "full",
+        "requested_fact_type": "responsible_person",
+        "intent": "roles_responsibility",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["kp_ckp_clarification"]
+      }
+    },
+    {
+      "id": "SC_APP01",
+      "group": "safe_clarification_applications",
+      "tags": ["safe_clarification", "neighbor", "clarification"],
+      "messages": [{"role": "user", "content": "Куда направить заявление?"}],
+      "expected": {
+        "answerability": "clarification",
+        "requested_fact_type": "document_recipient",
+        "intent": ["unknown", "document_flow"],
+        "operational_lookup": false,
+        "clarification": true,
+        "clarification_kind": "missing_document_type",
+        "missing_slots": ["application_type"],
+        "final_modes": ["clarification"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["random_organization_answer"]
+      }
+    },
+    {
+      "id": "SC_APP02",
+      "group": "safe_clarification_applications",
+      "tags": ["safe_clarification", "neighbor", "clarification_negative"],
+      "messages": [{"role": "user", "content": "Кому подать заявление на отпуск?"}],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "document_recipient",
+        "intent": ["vacation", "document_flow"],
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["kp_ckp_clarification"]
+      }
+    },
+    {
+      "id": "SC_APP03",
+      "group": "safe_clarification_applications",
+      "tags": ["safe_clarification", "neighbor", "clarification_negative"],
+      "messages": [{"role": "user", "content": "Кому подать заявление на командировку?"}],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "document_recipient",
+        "intent": "business_trip",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["kp_ckp_clarification"]
+      }
+    },
+    {
+      "id": "SC_APP04",
+      "group": "safe_clarification_applications",
+      "tags": ["safe_clarification", "neighbor", "clarification_negative"],
+      "messages": [{"role": "user", "content": "Куда отправить заявление на новое оборудование?"}],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "document_recipient",
+        "intent": ["equipment_it_request", "document_flow", "unknown"],
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["kp_ckp_clarification"]
+      }
+    },
+    {
+      "id": "SC_APP05",
+      "group": "safe_clarification_applications",
+      "tags": ["safe_clarification", "neighbor", "clarification"],
+      "messages": [{"role": "user", "content": "Кто согласует моё заявление?"}],
+      "expected": {
+        "answerability": "clarification",
+        "requested_fact_type": "responsible_person",
+        "intent": ["unknown", "roles_responsibility", "document_flow"],
+        "operational_lookup": false,
+        "clarification": true,
+        "clarification_kind": "missing_document_type",
+        "missing_slots": ["application_type"],
+        "final_modes": ["clarification"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": ["random_organization_answer"]
       }
     }
   ]

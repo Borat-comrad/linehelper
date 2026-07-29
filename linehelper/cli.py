@@ -197,6 +197,46 @@ def _command_chat(args: argparse.Namespace, config: LineHelperConfig) -> int:
         print()
         print("Debug:")
         print(f"intent: {query_plan.get('intent') or '-'}")
+        print(f"raw intent: {query_plan.get('raw_intent') or '-'}")
+        print(f"requested fact type: {query_plan.get('requested_fact_type') or '-'}")
+        print(f"temporal scope: {query_plan.get('temporal_scope') or '-'}")
+        print(f"subject: {query_plan.get('subject') or '-'}")
+        print(f"operational lookup: {query_plan.get('operational_lookup', False)}")
+        print(
+            "operational reason: "
+            f"{query_plan.get('operational_decision_reason') or '-'}"
+        )
+        print(
+            "validation reasons: "
+            f"{_join(query_plan.get('query_plan_validation_reasons'))}"
+        )
+        print(
+            "clarification raw/validated: "
+            f"{query_plan.get('raw_clarification_required', False)}/"
+            f"{query_plan.get('validated_clarification_required', False)}"
+        )
+        print(
+            "clarification kind raw/validated: "
+            f"{query_plan.get('raw_clarification_kind') or '-'}/"
+            f"{query_plan.get('validated_clarification_kind') or '-'}"
+        )
+        print(
+            "clarification span raw/validated: "
+            f"{query_plan.get('raw_ambiguity_span') or '-'}/"
+            f"{query_plan.get('validated_ambiguity_span') or '-'}"
+        )
+        print(
+            "clarification missing slots: "
+            f"{_join(query_plan.get('validated_missing_slots'))}"
+        )
+        print(
+            "clarification action: "
+            f"{query_plan.get('clarification_action') or '-'}"
+        )
+        print(
+            "clarification validation reasons: "
+            f"{_join(query_plan.get('clarification_validation_reasons'))}"
+        )
         print(f"normalized question: {query_plan.get('normalized_question') or '-'}")
         print(f"expansions: {_join(query_plan.get('query_expansions'))}")
         print(f"preferred sources: {_join(query_plan.get('preferred_sources'))}")

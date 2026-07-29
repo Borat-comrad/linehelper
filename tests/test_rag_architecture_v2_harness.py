@@ -21,7 +21,7 @@ def test_fixture_loads_all_core_and_neighbor_cases() -> None:
     fixture = harness.load_fixture(FIXTURE_PATH)
     ids = {case["id"] for case in fixture["cases"]}
 
-    assert len(fixture["cases"]) == 32
+    assert len(fixture["cases"]) == 51
     assert {"T01", "T02", "T03", "T04", "T05A", "T05B", "T06", "T07", "T08", "T09"} <= ids
     assert len([case for case in fixture["cases"] if "paired" in case["tags"]]) == 8
 
@@ -163,14 +163,21 @@ def test_multi_turn_evaluation_checks_each_turn_without_exact_assistant_text() -
             "clarification": {
                 "available": True,
                 "needed": True,
+                "validated_kind": "abbreviation",
                 "ambiguity_span": "КП",
+                "candidate_meanings": [
+                    "коммерческое предложение",
+                    "ценный конечный продукт",
+                ],
             }
         },
         {
             "clarification": {
                 "available": True,
                 "needed": False,
+                "validated_kind": "none",
                 "ambiguity_span": None,
+                "candidate_meanings": [],
             }
         },
     ]
@@ -184,7 +191,7 @@ def test_answer_concepts_accept_paraphrase_instead_of_exact_text() -> None:
     case = _case("T09")
     diagnostic = _diagnostic(
         intent="order_disposition",
-        requested_fact_type="normative_rule",
+        requested_fact_type="procedure",
         answer=(
             "Форма должна быть письменной. Если сообщение прозвучало устно, "
             "его фиксируют письменно при первой возможности."
@@ -259,6 +266,72 @@ def test_aggregate_metrics_computes_recall_and_context_rates() -> None:
     assert metrics["required_chunk_recall_at_5"]["required"] == 1
     assert metrics["required_chunk_recall_at_10"]["rate"] == 1.0
     assert metrics["required_chunk_in_context_rate"]["rate"] == 1.0
+
+
+def test_query_plan_v2_metrics_measure_availability_accuracy_and_missed_routes() -> None:
+    cases = [_case("PI01"), _case("PI02")]
+    responsibility = _diagnostic(
+        intent="roles_responsibility",
+        requested_fact_type="responsible_person",
+        operational=False,
+    )
+    responsibility["case_id"] = "PI01"
+    operational = _diagnostic(
+        intent="roles_responsibility",
+        requested_fact_type="responsible_person",
+        operational=False,
+    )
+    operational["case_id"] = "PI02"
+    records = [
+        harness.apply_evaluation(cases[0], responsibility),
+        harness.apply_evaluation(cases[1], operational),
+    ]
+
+    metrics = harness.aggregate_metrics(cases, records)
+
+    assert metrics["requested_fact_type_availability"]["rate"] == 1.0
+    assert metrics["requested_fact_type_accuracy"]["rate"] == 0.5
+    assert metrics["missed_operational_count"] == 1
+    assert metrics["paired_responsibility_status_pass_rate"]["rate"] == 0.5
+
+
+def test_safe_clarification_metrics_measure_recall_and_missing_slots() -> None:
+    cases = [_case("CL01")]
+    diagnostic = _diagnostic(clarification=True, response_kind="clarification")
+    diagnostic["case_id"] = "CL01"
+    diagnostic["clarification"].update(
+        {
+            "validated_required": True,
+            "validated_kind": "missing_document_type",
+            "missing_slots": ["document_type"],
+            "retrieval_started": False,
+        }
+    )
+    record = harness.apply_evaluation(cases[0], diagnostic)
+
+    metrics = harness.aggregate_metrics(cases, [record])
+
+    assert metrics["valid_clarification_recall"]["rate"] == 1.0
+    assert metrics["missing_slot_clarification_accuracy"]["rate"] == 1.0
+
+
+def test_safe_clarification_metrics_measure_rejection_and_retrieval() -> None:
+    cases = [_case("T09")]
+    diagnostic = _diagnostic()
+    diagnostic["case_id"] = "T09"
+    diagnostic["clarification"].update(
+        {
+            "raw_required": True,
+            "validated_required": False,
+            "retrieval_started": True,
+        }
+    )
+    record = harness.apply_evaluation(cases[0], diagnostic)
+
+    metrics = harness.aggregate_metrics(cases, [record])
+
+    assert metrics["invalid_clarification_rejection_rate"]["rate"] == 1.0
+    assert metrics["retrieval_started_after_rejected_clarification"]["rate"] == 1.0
 
 
 def test_generic_no_answer_metric_requires_stable_evidence_identity() -> None:
@@ -491,6 +564,34 @@ def test_retrieval_only_runner_records_absent_layers_as_unavailable() -> None:
     assert diagnostic["selected_context"]["available"] is False
 
 
+def test_live_runner_reads_native_query_plan_v2_diagnostics() -> None:
+    case = _case("T06")
+    recording = harness.RecordingRetriever(StaticRetriever([_retrieved_chunk()]))
+    generator = RagAnswerGenerator(
+        retriever=recording,
+        llm_client=FakeLlm("За доставку отвечает подтверждённый контакт."),
+        query_analyzer=StaticAnalyzer(_responsibility_plan()),
+    )
+
+    diagnostic = baseline_runner._run_full_case(
+        case,
+        repeat_index=1,
+        generator=generator,
+        retriever=recording,
+    )
+
+    assert diagnostic["requested_fact_type"] == "responsible_person"
+    assert diagnostic["temporal_scope"] == "static"
+    assert diagnostic["subject"] == "отгрузка клиенту"
+    assert diagnostic["operational_boundary"] == {
+        "available": True,
+        "operational_lookup": False,
+        "decision_reason": "static_requested_fact_type",
+        "derived_from": "query_plan.operational_lookup",
+        "native_decision_exposed": True,
+    }
+
+
 def test_blocked_live_records_do_not_become_unit_failures() -> None:
     case = _case("T09")
 
@@ -548,7 +649,8 @@ def _case(case_id: str) -> dict[str, Any]:
 def _diagnostic(
     *,
     intent: Any = "order_disposition",
-    requested_fact_type: Any = "normative_rule",
+    requested_fact_type: Any = "procedure",
+    temporal_scope: Any = "static",
     clarification: bool = False,
     operational: bool = False,
     response_kind: Any = "answer",
@@ -558,13 +660,30 @@ def _diagnostic(
 ) -> dict[str, Any]:
     return {
         "resolved_question": harness.unavailable("not implemented"),
-        "query_plan": {"intent": intent} if isinstance(intent, str) else {},
+        "query_plan": {
+            "intent": intent,
+            "requested_fact_type": requested_fact_type,
+            "temporal_scope": temporal_scope,
+        }
+        if isinstance(intent, str)
+        else {},
+        "raw_intent": intent,
+        "raw_requested_fact_type": requested_fact_type,
         "requested_fact_type": requested_fact_type,
+        "temporal_scope": temporal_scope,
         "intent": intent,
         "clarification": {
             "available": True,
             "needed": clarification,
+            "raw_required": clarification,
+            "validated_required": clarification,
+            "raw_kind": "none",
+            "validated_kind": "none",
             "ambiguity_span": None,
+            "candidate_meanings": [],
+            "missing_slots": [],
+            "action": "clarify" if clarification else "continue_retrieval",
+            "retrieval_started": not clarification,
         },
         "operational_boundary": {
             "available": True,
@@ -686,6 +805,11 @@ def _responsibility_plan() -> QueryPlan:
         clarification_question=None,
         confidence=1.0,
         notes="deterministic test plan",
+        requested_fact_type="responsible_person",
+        temporal_scope="static",
+        subject="отгрузка клиенту",
+        operational_lookup=False,
+        operational_decision_reason="static_requested_fact_type",
     )
 
 
@@ -714,4 +838,9 @@ def _operational_plan() -> QueryPlan:
         clarification_question=None,
         confidence=1.0,
         notes="deterministic test plan",
+        requested_fact_type="current_status",
+        temporal_scope="current",
+        subject="заказ №12345",
+        operational_lookup=True,
+        operational_decision_reason="current_operational_fact_type",
     )

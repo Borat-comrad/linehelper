@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Protocol
 
 from linehelper.llm.ollama_client import OllamaClient
@@ -55,6 +55,82 @@ ALLOWED_ANSWER_TYPES = frozenset(
         "partial_answer",
         "no_answer",
         "general",
+    }
+)
+
+ALLOWED_REQUESTED_FACT_TYPES = frozenset(
+    {
+        "definition",
+        "procedure",
+        "responsible_person",
+        "primary_contact",
+        "unit_head",
+        "document_recipient",
+        "list",
+        "comparison",
+        "current_status",
+        "current_value",
+        "price",
+        "availability",
+        "unknown",
+    }
+)
+
+ALLOWED_TEMPORAL_SCOPES = frozenset(
+    {
+        "static",
+        "current",
+        "historical",
+        "unknown",
+    }
+)
+
+ALLOWED_CLARIFICATION_KINDS = frozenset(
+    {
+        "none",
+        "abbreviation",
+        "lexical_ambiguity",
+        "missing_subject",
+        "missing_object",
+        "missing_document_type",
+        "missing_scope",
+        "missing_required_slot",
+    }
+)
+
+ALLOWED_CLARIFICATION_ACTIONS = frozenset(
+    {
+        "clarify",
+        "continue_retrieval",
+    }
+)
+
+AMBIGUITY_REGISTRY: dict[str, tuple[str, ...]] = {
+    "КП": (
+        "коммерческое предложение",
+        "ценный конечный продукт",
+    ),
+}
+
+STATIC_FACT_TYPES = frozenset(
+    {
+        "definition",
+        "procedure",
+        "responsible_person",
+        "primary_contact",
+        "unit_head",
+        "document_recipient",
+        "list",
+        "comparison",
+    }
+)
+
+CURRENT_OPERATIONAL_FACT_TYPES = frozenset(
+    {
+        "current_status",
+        "current_value",
+        "price",
+        "availability",
     }
 )
 
@@ -128,6 +204,29 @@ _FORBIDDEN_CKP_MEANING_RE = re.compile(
 
 
 @dataclass(frozen=True)
+class ClarificationPlan:
+    """Analyzer proposal or validated decision about a clarification turn."""
+
+    required: bool = False
+    kind: str = "none"
+    ambiguity_span: str | None = None
+    candidate_meanings: list[str] = field(default_factory=list)
+    missing_slots: list[str] = field(default_factory=list)
+    question: str | None = None
+    confidence: float = 0.0
+
+
+@dataclass(frozen=True)
+class ClarificationDecision:
+    """Raw and validated clarification plans plus the runtime action."""
+
+    raw: ClarificationPlan = field(default_factory=ClarificationPlan)
+    validated: ClarificationPlan = field(default_factory=ClarificationPlan)
+    action: str = "continue_retrieval"
+    validation_reasons: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class QueryPlan:
     intent: str
     normalized_question: str
@@ -138,6 +237,20 @@ class QueryPlan:
     clarification_question: str | None
     confidence: float
     notes: str | None
+    requested_fact_type: str = "unknown"
+    temporal_scope: str = "unknown"
+    subject: str = ""
+    operational_lookup: bool = False
+    operational_decision_reason: str = "not_evaluated"
+    raw_intent: str | None = None
+    raw_requested_fact_type: str | None = None
+    raw_temporal_scope: str | None = None
+    raw_subject: str | None = None
+    validation_reasons: list[str] = field(default_factory=list)
+    clarification: ClarificationPlan = field(default_factory=ClarificationPlan)
+    raw_clarification: ClarificationPlan | None = None
+    clarification_action: str = "continue_retrieval"
+    clarification_validation_reasons: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a plain dict for diagnostics and smoke scripts."""
@@ -217,8 +330,27 @@ def build_query_analyzer_prompt(question: str) -> list[dict[str, str]]:
 - Верни ровно один JSON-объект.
 - intent должен быть одним из: {", ".join(sorted(ALLOWED_INTENTS))}.
 - answer_type должен быть одним из: {", ".join(sorted(ALLOWED_ANSWER_TYPES))}.
+- requested_fact_type должен быть одним из: {", ".join(sorted(ALLOWED_REQUESTED_FACT_TYPES))}.
+- temporal_scope должен быть одним из: {", ".join(sorted(ALLOWED_TEMPORAL_SCOPES))}.
+- clarification.kind должен быть одним из: {", ".join(sorted(ALLOWED_CLARIFICATION_KINDS))}.
+- subject — краткий нормализованный предмет вопроса, отдельно от типа запрашиваемого факта.
+- Сначала определи requested_fact_type, затем temporal_scope и только после этого intent.
+- Слова "заказ", "склад", "отгрузка", "оплата", "счёт" и "поставка" описывают subject
+  и сами по себе не делают вопрос операционным.
+- Вопросы "кто отвечает", "кто занимается", "кто ведёт", "кто руководит",
+  "кто главный", "к кому обратиться" имеют статический тип ответственности и
+  не относятся к one_c_operational_lookup.
+- one_c_operational_lookup используй для текущего статуса, текущего значения,
+  текущей цены или наличия: например, "какой статус", "оплачен ли",
+  "отгружен ли", "что сейчас есть", "какая текущая цена".
 - Если вопрос вне корпоративной базы, используй intent="off_topic" и answer_type="no_answer".
 - Если вопрос неоднозначный про "КП", используй intent="ambiguous_abbreviation", answer_type="clarification", needs_clarification=true.
+- clarification.required=true допустим только при доказанной неоднозначности или
+  отсутствующем обязательном параметре. Не используй clarification как общий fallback.
+- Для abbreviation/lexical_ambiguity укажи ambiguity_span, минимум два разных
+  candidate_meanings и предметный question.
+- Для missing_* укажи минимум один конкретный missing_slot и предметный question.
+- Если уточнение не требуется, верни clarification.required=false и kind="none".
 - Если вопрос про "ЦКП", используй intent="company_ckp".
 - ЦКП = ценный конечный продукт. ЦКП НЕ означает "центр комплексных предложений".
 
@@ -239,12 +371,18 @@ def build_query_analyzer_prompt(question: str) -> list[dict[str, str]]:
 - Для document_loss не используй answer_type="procedure"; используй "partial_answer" или "no_answer".
 - Для equipment_it_request не используй answer_type="procedure"; если нет известного источника, preferred_sources должен быть пустым.
 - Для attendance_absence, equipment_it_request, document_loss, one_c_operational_lookup и kp_commercial_offer не используй answer_type="procedure", если нет достоверного источника.
-- Операционные 1С-вопросы про цены, остатки, статус заказа, счета, контрагентов, отгрузки и номенклатуру относятся к one_c_operational_lookup. Они пока не относятся к semantic memory и не выполняют поиск в 1С.
+- Текущие операционные 1С-вопросы про цены, остатки, статус заказа, счета,
+  контрагентов, отгрузки и номенклатуру относятся к one_c_operational_lookup.
+  Вопросы о правилах, процедурах и ответственных по тем же предметам остаются
+  semantic/static. Операционные запросы пока не выполняют поиск в 1С.
 - Вопросы про опоздание, болезнь, отсутствие и невыход на работу относятся к attendance_absence, а не к vacation.
 
 JSON schema:
 {{
   "intent": "org_structure",
+  "requested_fact_type": "list",
+  "temporal_scope": "static",
+  "subject": "организационная структура компании",
   "normalized_question": "Какие подразделения и отделения есть в организационной структуре компании?",
   "query_expansions": [
     "оргсхема компании",
@@ -259,6 +397,15 @@ JSON schema:
   "answer_type": "list",
   "needs_clarification": false,
   "clarification_question": null,
+  "clarification": {{
+    "required": false,
+    "kind": "none",
+    "ambiguity_span": null,
+    "candidate_meanings": [],
+    "missing_slots": [],
+    "question": null,
+    "confidence": 0.0
+  }},
   "confidence": 0.9,
   "notes": "Вопрос про организационную структуру компании."
 }}
@@ -276,8 +423,117 @@ def parse_query_plan_response(content: str, question: str) -> QueryPlan:
     return _query_plan_from_mapping(data, question)
 
 
+def validate_query_plan(plan: QueryPlan, question: str) -> QueryPlan:
+    """Validate a QueryPlan supplied by a deterministic or external analyzer."""
+    return _sanitize_plan(plan, question)
+
+
+def validate_clarification(
+    question: str,
+    query_plan: QueryPlan,
+) -> ClarificationDecision:
+    """Accept clarification only when the current question proves it is needed."""
+    raw = (
+        query_plan.raw_clarification
+        if query_plan.raw_clarification is not None
+        else _legacy_clarification_from_plan(query_plan)
+    )
+    normalized_question = _normalize_for_match(question)
+    reasons: list[str] = []
+
+    registry_plan = _registered_ambiguity_plan(normalized_question)
+    if registry_plan is not None:
+        if not raw.required:
+            _append_reason(reasons, "deterministic_ambiguity_registry")
+        elif raw.kind not in {"abbreviation", "lexical_ambiguity"}:
+            _append_reason(reasons, "clarification_kind_corrected")
+        if raw.ambiguity_span is None:
+            _append_reason(reasons, "ambiguity_span_inferred_from_registry")
+        if len(_distinct_values(raw.candidate_meanings)) < 2:
+            _append_reason(reasons, "candidate_meanings_inferred_from_registry")
+        if not _is_subjective_clarification_question(raw.question):
+            _append_reason(reasons, "clarification_question_built_from_registry")
+        return ClarificationDecision(
+            raw=raw,
+            validated=registry_plan,
+            action="clarify",
+            validation_reasons=reasons,
+        )
+
+    missing_slot_plan = _deterministic_missing_slot_plan(normalized_question)
+    if missing_slot_plan is not None:
+        if not raw.required:
+            _append_reason(reasons, "deterministic_missing_required_slot")
+        elif raw.kind != missing_slot_plan.kind:
+            _append_reason(reasons, "clarification_kind_corrected")
+        if not set(raw.missing_slots).intersection(missing_slot_plan.missing_slots):
+            _append_reason(reasons, "missing_slots_inferred")
+        if not _missing_slot_question_is_relevant(
+            raw.question,
+            missing_slot_plan.missing_slots,
+        ):
+            _append_reason(reasons, "clarification_question_built_for_missing_slot")
+        return ClarificationDecision(
+            raw=raw,
+            validated=missing_slot_plan,
+            action="clarify",
+            validation_reasons=reasons,
+        )
+
+    if not raw.required:
+        return ClarificationDecision(raw=raw)
+
+    if raw.kind not in ALLOWED_CLARIFICATION_KINDS or raw.kind == "none":
+        _append_reason(reasons, "invalid_clarification_kind")
+
+    if raw.kind in {"abbreviation", "lexical_ambiguity"}:
+        if not raw.ambiguity_span:
+            _append_reason(reasons, "missing_ambiguity_span")
+        elif not _span_occurs_in_question(question, raw.ambiguity_span):
+            _append_reason(reasons, "ambiguity_span_not_in_question")
+
+        meanings = _distinct_values(raw.candidate_meanings)
+        if len(meanings) < 2:
+            _append_reason(reasons, "insufficient_candidate_meanings")
+        if not _is_subjective_clarification_question(raw.question):
+            _append_reason(reasons, "invalid_clarification_question")
+        elif raw.ambiguity_span and not _question_mentions_ambiguity(
+            raw.question,
+            raw.ambiguity_span,
+            meanings,
+        ):
+            _append_reason(reasons, "clarification_question_not_about_ambiguity")
+
+        if not reasons:
+            return ClarificationDecision(
+                raw=raw,
+                validated=replace(raw, candidate_meanings=meanings),
+                action="clarify",
+            )
+    elif raw.kind.startswith("missing_"):
+        if not _distinct_values(raw.missing_slots):
+            _append_reason(reasons, "missing_required_slot")
+        if not _missing_slot_question_is_relevant(raw.question, raw.missing_slots):
+            _append_reason(reasons, "clarification_question_not_about_missing_slot")
+        _append_reason(reasons, "missing_slot_not_proven_by_question")
+
+    if query_plan.subject:
+        _append_reason(reasons, "question_is_sufficiently_specific")
+    _append_reason(reasons, "invalid_clarification_rejected")
+    return ClarificationDecision(
+        raw=raw,
+        validation_reasons=reasons,
+    )
+
+
 def fallback_query_plan(question: str) -> QueryPlan:
-    """Small rule-based safety net for unavailable or malformed analyzer output."""
+    """Return a deterministic, validated QueryPlan v2 safety net."""
+    base_plan = _fallback_query_plan_base(question)
+    return _sanitize_plan(base_plan, question, fallback_used=True)
+
+
+def _fallback_query_plan_base(question: str) -> QueryPlan:
+    """Build the legacy domain plan before QueryPlan v2 validation."""
     clean_question = question.strip()
     normalized = _normalize_for_match(clean_question)
 
@@ -612,29 +868,43 @@ def fallback_query_plan(question: str) -> QueryPlan:
 
 
 def _query_plan_from_mapping(data: dict[str, Any], question: str) -> QueryPlan:
-    intent = data.get("intent")
-    if not isinstance(intent, str) or intent not in ALLOWED_INTENTS:
+    raw_intent = _coerce_optional_str(data.get("intent"))
+    intent = raw_intent
+    if intent not in ALLOWED_INTENTS:
         intent = "unknown"
 
     answer_type = data.get("answer_type")
     if not isinstance(answer_type, str) or answer_type not in ALLOWED_ANSWER_TYPES:
         answer_type = "general"
 
+    raw_requested_fact_type = _coerce_optional_str(data.get("requested_fact_type"))
+    requested_fact_type = (
+        raw_requested_fact_type
+        if raw_requested_fact_type in ALLOWED_REQUESTED_FACT_TYPES
+        else "unknown"
+    )
+    raw_temporal_scope = _coerce_optional_str(data.get("temporal_scope"))
+    temporal_scope = (
+        raw_temporal_scope
+        if raw_temporal_scope in ALLOWED_TEMPORAL_SCOPES
+        else "unknown"
+    )
+    raw_subject = _coerce_optional_str(data.get("subject"))
     normalized_question = _coerce_str(data.get("normalized_question")) or question
     query_expansions = _coerce_str_list(data.get("query_expansions"))
     preferred_sources = _coerce_str_list(data.get("preferred_sources"))
     needs_clarification = _coerce_bool(data.get("needs_clarification"))
     clarification_question = _coerce_optional_str(data.get("clarification_question"))
+    raw_clarification = _clarification_from_mapping(
+        data.get("clarification"),
+        legacy_required=needs_clarification,
+        legacy_question=clarification_question,
+    )
     confidence = _coerce_confidence(data.get("confidence"))
     notes = _coerce_optional_str(data.get("notes"))
 
     if intent == "ambiguous_abbreviation":
         answer_type = "clarification"
-        needs_clarification = True
-        clarification_question = clarification_question or (
-            "Вы имеете в виду КП как коммерческое предложение или ЦКП "
-            "как ценный конечный продукт компании?"
-        )
 
     if intent == "off_topic":
         answer_type = "no_answer"
@@ -649,48 +919,62 @@ def _query_plan_from_mapping(data: dict[str, Any], question: str) -> QueryPlan:
         clarification_question=clarification_question,
         confidence=confidence,
         notes=notes,
+        requested_fact_type=requested_fact_type,
+        temporal_scope=temporal_scope,
+        subject=_normalize_subject(raw_subject or ""),
+        raw_intent=raw_intent,
+        raw_requested_fact_type=raw_requested_fact_type,
+        raw_temporal_scope=raw_temporal_scope,
+        raw_subject=raw_subject,
+        raw_clarification=raw_clarification,
     )
     return _sanitize_plan(plan, question)
 
 
-def _sanitize_plan(plan: QueryPlan, question: str) -> QueryPlan:
+def _sanitize_plan(
+    plan: QueryPlan,
+    question: str,
+    *,
+    fallback_used: bool = False,
+) -> QueryPlan:
     normalized_question = _normalize_for_match(question)
+    base_plan = plan
 
     if _is_ambiguous_kp_question(normalized_question):
-        return fallback_query_plan(question)
+        base_plan = _carry_raw_diagnostics(_fallback_query_plan_base(question), plan)
+    elif _is_kp_commercial_offer_question(normalized_question):
+        base_plan = _carry_raw_diagnostics(_fallback_query_plan_base(question), plan)
+    elif _is_attendance_absence_question(normalized_question):
+        base_plan = _carry_raw_diagnostics(_fallback_query_plan_base(question), plan)
+    elif _is_company_identity_question(normalized_question):
+        base_plan = _carry_raw_diagnostics(_fallback_query_plan_base(question), plan)
+    elif _is_roles_responsibility_question(normalized_question):
+        base_plan = _carry_raw_diagnostics(_roles_responsibility_plan(question), plan)
+    elif plan.intent == "company_ckp" or _is_ckp_question(normalized_question):
+        base_plan = _sanitize_ckp_plan(plan)
 
-    if _is_kp_commercial_offer_question(normalized_question):
-        return fallback_query_plan(question)
+    validated_plan = _validate_query_plan_v2(
+        base_plan,
+        question,
+        fallback_used=fallback_used,
+    )
+    answer_type = validated_plan.answer_type
+    preferred_sources = _filter_compatible_sources(
+        validated_plan.preferred_sources,
+        validated_plan.intent,
+    )
 
-    if _is_attendance_absence_question(normalized_question):
-        return _with_compatible_sources(fallback_query_plan(question))
-
-    if _is_one_c_operational_lookup_question(normalized_question):
-        return _with_compatible_sources(fallback_query_plan(question))
-
-    if _is_company_identity_question(normalized_question):
-        return _with_compatible_sources(fallback_query_plan(question))
-
-    if _is_roles_responsibility_question(normalized_question):
-        return _with_compatible_sources(_roles_responsibility_plan(question))
-
-    if plan.intent == "company_ckp" or _is_ckp_question(normalized_question):
-        return _sanitize_ckp_plan(plan)
-
-    answer_type = plan.answer_type
-    preferred_sources = _filter_compatible_sources(plan.preferred_sources, plan.intent)
-
-    if plan.intent == "document_loss":
+    if validated_plan.intent == "document_loss":
         if answer_type == "procedure":
             answer_type = "partial_answer"
         preferred_sources = []
 
-    if plan.intent == "equipment_it_request":
+    if validated_plan.intent == "equipment_it_request":
         if answer_type == "procedure":
             answer_type = "general"
         preferred_sources = []
 
-    if plan.intent in {
+    if validated_plan.intent in {
         "one_c_operational_lookup",
         "kp_commercial_offer",
         "attendance_absence",
@@ -698,17 +982,611 @@ def _sanitize_plan(plan: QueryPlan, question: str) -> QueryPlan:
         if answer_type == "procedure" and not preferred_sources:
             answer_type = "partial_answer"
 
-    return QueryPlan(
-        intent=plan.intent,
-        normalized_question=plan.normalized_question,
-        query_expansions=plan.query_expansions,
+    prepared_plan = replace(
+        validated_plan,
         preferred_sources=preferred_sources,
         answer_type=answer_type,
-        needs_clarification=plan.needs_clarification,
-        clarification_question=plan.clarification_question,
-        confidence=plan.confidence,
-        notes=plan.notes,
     )
+    clarification_decision = validate_clarification(question, prepared_plan)
+    validated_clarification = clarification_decision.validated
+    if clarification_decision.action == "clarify":
+        answer_type = "clarification"
+        intent = (
+            "ambiguous_abbreviation"
+            if validated_clarification.kind
+            in {"abbreviation", "lexical_ambiguity"}
+            else "unknown"
+        )
+        operational_lookup = False
+        operational_decision_reason = "clarification_required_before_routing"
+        validation_reasons = list(prepared_plan.validation_reasons)
+        _append_reason(validation_reasons, "clarification_routing_deferred")
+    elif answer_type == "clarification":
+        answer_type = "general"
+        intent = prepared_plan.intent
+        operational_lookup = prepared_plan.operational_lookup
+        operational_decision_reason = prepared_plan.operational_decision_reason
+        validation_reasons = list(prepared_plan.validation_reasons)
+    else:
+        intent = prepared_plan.intent
+        operational_lookup = prepared_plan.operational_lookup
+        operational_decision_reason = prepared_plan.operational_decision_reason
+        validation_reasons = list(prepared_plan.validation_reasons)
+
+    return replace(
+        prepared_plan,
+        intent=intent,
+        answer_type=answer_type,
+        operational_lookup=operational_lookup,
+        operational_decision_reason=operational_decision_reason,
+        validation_reasons=validation_reasons,
+        needs_clarification=validated_clarification.required,
+        clarification_question=validated_clarification.question,
+        clarification=validated_clarification,
+        raw_clarification=clarification_decision.raw,
+        clarification_action=clarification_decision.action,
+        clarification_validation_reasons=list(
+            clarification_decision.validation_reasons
+        ),
+    )
+
+
+def _validate_query_plan_v2(
+    plan: QueryPlan,
+    question: str,
+    *,
+    fallback_used: bool,
+) -> QueryPlan:
+    """Make fact type and time scope authoritative over subject keywords."""
+    normalized_question = _normalize_for_match(question)
+    reasons = list(plan.validation_reasons)
+    if fallback_used:
+        _append_reason(reasons, "fallback_plan")
+
+    raw_requested_fact_type = plan.raw_requested_fact_type
+    if (
+        raw_requested_fact_type is not None
+        and raw_requested_fact_type not in ALLOWED_REQUESTED_FACT_TYPES
+    ):
+        _append_reason(reasons, "invalid_requested_fact_type")
+    raw_temporal_scope = plan.raw_temporal_scope
+    if (
+        raw_temporal_scope is not None
+        and raw_temporal_scope not in ALLOWED_TEMPORAL_SCOPES
+    ):
+        _append_reason(reasons, "invalid_temporal_scope")
+
+    requested_fact_type = (
+        plan.requested_fact_type
+        if plan.requested_fact_type in ALLOWED_REQUESTED_FACT_TYPES
+        else "unknown"
+    )
+    inferred_fact_type, fact_reason = _infer_requested_fact_type(
+        normalized_question,
+        plan,
+    )
+    if inferred_fact_type != "unknown":
+        if requested_fact_type != inferred_fact_type:
+            requested_fact_type = inferred_fact_type
+            _append_reason(reasons, fact_reason)
+    elif requested_fact_type == "unknown":
+        inferred_from_plan = _fact_type_from_plan(plan)
+        if inferred_from_plan != "unknown":
+            requested_fact_type = inferred_from_plan
+            _append_reason(reasons, "requested_fact_type_inferred_from_plan")
+
+    temporal_scope = (
+        plan.temporal_scope
+        if plan.temporal_scope in ALLOWED_TEMPORAL_SCOPES
+        else "unknown"
+    )
+    inferred_temporal_scope, temporal_reason = _infer_temporal_scope(
+        normalized_question,
+        requested_fact_type,
+    )
+    if inferred_temporal_scope != "unknown" and temporal_scope != inferred_temporal_scope:
+        temporal_scope = inferred_temporal_scope
+        _append_reason(reasons, temporal_reason)
+
+    subject = _normalize_subject(plan.subject)
+    if not subject:
+        subject = _infer_subject(normalized_question)
+        if subject:
+            _append_reason(reasons, "subject_inferred")
+
+    operational_lookup, operational_reason = _operational_decision(
+        requested_fact_type,
+        temporal_scope,
+        plan.intent,
+    )
+    intent = plan.intent if plan.intent in ALLOWED_INTENTS else "unknown"
+    if operational_lookup and intent != "one_c_operational_lookup":
+        intent = "one_c_operational_lookup"
+        _append_reason(reasons, "intent_corrected_to_one_c_operational_lookup")
+    elif requested_fact_type in {
+        "responsible_person",
+        "primary_contact",
+        "unit_head",
+    } and intent != "roles_responsibility":
+        intent = "roles_responsibility"
+        _append_reason(reasons, "intent_corrected_to_roles_responsibility")
+    elif (
+        not operational_lookup
+        and intent == "one_c_operational_lookup"
+        and requested_fact_type in STATIC_FACT_TYPES
+    ):
+        intent = "unknown"
+        _append_reason(reasons, "static_fact_cleared_operational_intent")
+    elif temporal_scope == "historical" and intent == "one_c_operational_lookup":
+        intent = "unknown"
+        _append_reason(reasons, "historical_not_routed_as_current")
+
+    return replace(
+        plan,
+        intent=intent,
+        requested_fact_type=requested_fact_type,
+        temporal_scope=temporal_scope,
+        subject=subject,
+        operational_lookup=operational_lookup,
+        operational_decision_reason=operational_reason,
+        validation_reasons=reasons,
+    )
+
+
+def _carry_raw_diagnostics(target: QueryPlan, source: QueryPlan) -> QueryPlan:
+    """Keep the analyzer proposal visible when a deterministic rule replaces it."""
+    return replace(
+        target,
+        requested_fact_type=source.requested_fact_type,
+        temporal_scope=source.temporal_scope,
+        subject=source.subject,
+        raw_intent=source.raw_intent,
+        raw_requested_fact_type=source.raw_requested_fact_type,
+        raw_temporal_scope=source.raw_temporal_scope,
+        raw_subject=source.raw_subject,
+        validation_reasons=list(source.validation_reasons),
+        raw_clarification=(
+            source.raw_clarification
+            if source.raw_clarification is not None
+            else _legacy_clarification_from_plan(source)
+        ),
+    )
+
+
+def _infer_requested_fact_type(
+    question: str,
+    plan: QueryPlan,
+) -> tuple[str, str]:
+    if _contains_any(
+        question,
+        (
+            "кто руководит",
+            "кто главный",
+            "кто начальник",
+            "руководитель какого",
+        ),
+    ):
+        return "unit_head", "explicit_unit_head_question"
+    if _contains_any(
+        question,
+        (
+            "к кому обратиться",
+            "к кому обращаться",
+            "к кому идти",
+            "кто контактное лицо",
+            "контактное лицо",
+        ),
+    ):
+        return "primary_contact", "explicit_primary_contact_question"
+    if _is_explicit_responsibility_question(question):
+        return "responsible_person", "explicit_responsibility_question"
+    if _contains_any(
+        question,
+        (
+            "кому подавать",
+            "кому подать",
+            "кому отдать",
+            "куда подавать",
+            "куда подать",
+            "куда отдать",
+        ),
+    ):
+        return "document_recipient", "explicit_document_recipient_question"
+    if _is_procedure_question(question):
+        return "procedure", "explicit_procedure_question"
+    if _contains_any(question, ("что такое", "что означает", "что значит")):
+        return "definition", "explicit_definition_question"
+    if _contains_any(
+        question,
+        (
+            "чем отличается",
+            "сравни",
+            "разница между",
+            "одно и то же",
+            "то же самое",
+        ),
+    ):
+        return "comparison", "explicit_comparison_question"
+    if _contains_any(
+        question,
+        (
+            "какие правила",
+            "какие подразделения",
+            "какие отделы",
+            "перечисли",
+            "список ",
+            "что у нас по ",
+        ),
+    ):
+        return "list", "explicit_list_question"
+    if _is_current_status_question(question):
+        return "current_status", "explicit_current_status_question"
+    if _is_availability_question(question):
+        return "availability", "explicit_availability_question"
+    if _is_price_question(question):
+        return "price", "explicit_price_question"
+    if _is_current_value_question(question):
+        return "current_value", "explicit_current_value_question"
+    return "unknown", ""
+
+
+def _fact_type_from_plan(plan: QueryPlan) -> str:
+    if plan.intent == "roles_responsibility":
+        return "responsible_person"
+    if plan.intent == "one_c_operational_lookup":
+        return "current_value"
+    if plan.answer_type in {"definition", "procedure", "list", "comparison"}:
+        return plan.answer_type
+    return "unknown"
+
+
+def _infer_temporal_scope(
+    question: str,
+    requested_fact_type: str,
+) -> tuple[str, str]:
+    if _contains_any(
+        question,
+        (
+            "в прошлом",
+            "прошлый заказ",
+            "прошлом заказе",
+            "раньше",
+            "историческ",
+            "была цена",
+            "был статус",
+        ),
+    ):
+        return "historical", "explicit_historical_scope"
+    if requested_fact_type in STATIC_FACT_TYPES:
+        return "static", "static_fact_type"
+    if requested_fact_type in CURRENT_OPERATIONAL_FACT_TYPES:
+        return "current", "current_operational_fact_type"
+    if _contains_any(
+        question,
+        (
+            "сейчас",
+            "текущ",
+            "на данный момент",
+            "уже",
+            "сегодня",
+        ),
+    ):
+        return "current", "explicit_current_scope"
+    return "unknown", ""
+
+
+def _operational_decision(
+    requested_fact_type: str,
+    temporal_scope: str,
+    intent: str,
+) -> tuple[bool, str]:
+    if temporal_scope == "historical":
+        return False, "historical_scope_not_current_lookup"
+    if (
+        requested_fact_type in CURRENT_OPERATIONAL_FACT_TYPES
+        and temporal_scope == "current"
+    ):
+        return True, "current_operational_fact_type"
+    if requested_fact_type in STATIC_FACT_TYPES:
+        return False, "static_requested_fact_type"
+    if requested_fact_type == "unknown" and intent == "one_c_operational_lookup":
+        return True, "legacy_operational_intent"
+    return False, "no_current_operational_signal"
+
+
+def _is_procedure_question(question: str) -> bool:
+    return _contains_any(
+        question,
+        (
+            "как оформить",
+            "как получить",
+            "как проходит",
+            "как согласовать",
+            "как создать",
+            "как подать",
+            "как завести",
+            "как запросить",
+            "как установить",
+            "что делать",
+            "порядок ",
+        ),
+    )
+
+
+def _is_explicit_responsibility_question(question: str) -> bool:
+    return _contains_any(
+        question,
+        (
+            "кто отвечает",
+            "кто занимается",
+            "кто ведет",
+            "чья ответственность",
+            "кто выпускает",
+            "какой отдел занимается",
+        ),
+    ) or re.search(r"\bкто\b[^?]{0,40}\bзанимается\b", question) is not None
+
+
+def _is_current_status_question(question: str) -> bool:
+    return _contains_any(
+        question,
+        (
+            "какой статус",
+            "статус заказа",
+            "на каком этапе",
+            "отгружен ли",
+            "отгрузили ли",
+            "оплачен ли",
+            "согласуют мое уже поданное",
+            "согласуют моё уже поданное",
+            "когда поставщик отгрузит",
+            "какая отгрузка по заказу",
+        ),
+    )
+
+
+def _is_availability_question(question: str) -> bool:
+    return _contains_any(
+        question,
+        (
+            "что сейчас есть",
+            "есть ли остатки",
+            "остатки на складе",
+            "в наличии",
+            "наличие ",
+            "покажи остатки",
+        ),
+    )
+
+
+def _is_price_question(question: str) -> bool:
+    return _contains_any(
+        question,
+        (
+            "текущая цена",
+            "текущую цену",
+            "какая цена",
+            "найди цену",
+            "цена",
+            "цену",
+            "стоимость детали",
+            "сколько сейчас стоит",
+        ),
+    )
+
+
+def _is_current_value_question(question: str) -> bool:
+    if _contains_any(
+        question,
+        (
+            "найди контрагента",
+            "найди деталь",
+            "покажи счета",
+            "покажи номенклатуру",
+        ),
+    ):
+        return True
+    return (
+        _contains_any(question, ("сейчас", "текущ", "на данный момент"))
+        and _has_operational_subject(question)
+    )
+
+
+def _has_operational_subject(question: str) -> bool:
+    return _contains_any(
+        question,
+        (
+            "заказ",
+            "склад",
+            "отгруз",
+            "оплат",
+            "счет",
+            "постав",
+            "контрагент",
+            "номенклатур",
+            "цен",
+            "остат",
+        ),
+    )
+
+
+def _infer_subject(question: str) -> str:
+    value = question
+    prefixes = (
+        r"^кто\s+(?:отвечает|занимается|ведет|руководит|главный|выпускает)\s+(?:за\s+|по\s+)?",
+        r"^к\s+кому\s+обратиться\s+(?:по\s+)?",
+        r"^кому\s+(?:подавать|подать|отдать)\s+",
+        r"^какой\s+(?:сейчас\s+)?статус\s+",
+        r"^что\s+сейчас\s+есть\s+(?:на|в)\s+",
+        r"^как\s+(?:оформить|получить|проходит|согласовать|создать)\s+",
+        r"^(?:отгружен|оплачен)\s+ли\s+(?:уже\s+)?",
+        r"^какая\s+(?:текущая\s+)?",
+        r"^какие\s+",
+        r"^что\s+такое\s+",
+    )
+    for pattern in prefixes:
+        updated = re.sub(pattern, "", value, count=1)
+        if updated != value:
+            value = updated
+            break
+    return _normalize_subject(value)
+
+
+def _normalize_subject(value: str) -> str:
+    normalized = _normalize_for_match(value)
+    normalized = re.sub(r"[?!.,;:]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
+def _append_reason(reasons: list[str], reason: str) -> None:
+    if reason and reason not in reasons:
+        reasons.append(reason)
+
+
+def _registered_ambiguity_plan(question: str) -> ClarificationPlan | None:
+    if not _is_ambiguous_kp_question(question):
+        return None
+    meanings = list(AMBIGUITY_REGISTRY["КП"])
+    return ClarificationPlan(
+        required=True,
+        kind="abbreviation",
+        ambiguity_span="КП",
+        candidate_meanings=meanings,
+        question=(
+            "Вы имеете в виду КП как коммерческое предложение "
+            "или как ценный конечный продукт?"
+        ),
+        confidence=1.0,
+    )
+
+
+def _deterministic_missing_slot_plan(question: str) -> ClarificationPlan | None:
+    if re.search(r"\b(кто|кому|куда)\b[^?]{0,30}\b(этим|это|этого)\b", question):
+        return ClarificationPlan(
+            required=True,
+            kind="missing_subject",
+            missing_slots=["subject"],
+            question="Что именно вы имеете в виду под «этим»?",
+            confidence=1.0,
+        )
+
+    application_is_vague = (
+        re.search(
+            r"\b(?:куда|кому)\s+(?:направить|отправить|подать|подавать)\s+"
+            r"(?:мое\s+|моё\s+)?заявлени\w*\s*[?!.,]*$",
+            question,
+        )
+        is not None
+        or re.search(
+            r"\bкто\s+согласу\w+\s+(?:мое\s+|моё\s+)?заявлени\w*\s*[?!.,]*$",
+            question,
+        )
+        is not None
+    )
+    if application_is_vague:
+        return ClarificationPlan(
+            required=True,
+            kind="missing_document_type",
+            missing_slots=["application_type"],
+            question="Какое именно заявление вы имеете в виду?",
+            confidence=1.0,
+        )
+
+    document_recipient = re.search(
+        r"\b(?:куда|кому)\s+(?:отдать|передать|направить|отправить|подать|подавать)\b",
+        question,
+    )
+    generic_documents = re.search(r"\b(?:документ\w*|бумаг\w*)\b", question)
+    specific_document_type = re.search(
+        r"\b(?:кадров\w*|бухгалтер\w*|внутренн\w*|оригинал\w*|эдо|"
+        r"договор\w*|командиров\w*|отпуск\w*|оборудован\w*)\b",
+        question,
+    )
+    if document_recipient and generic_documents and not specific_document_type:
+        return ClarificationPlan(
+            required=True,
+            kind="missing_document_type",
+            missing_slots=["document_type"],
+            question="Какие именно документы вы имеете в виду?",
+            confidence=1.0,
+        )
+    return None
+
+
+def _span_occurs_in_question(question: str, span: str) -> bool:
+    return (
+        re.search(
+            rf"(?<!\w){re.escape(span)}(?!\w)",
+            question,
+            flags=re.IGNORECASE,
+        )
+        is not None
+    )
+
+
+def _distinct_values(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        clean_value = value.strip()
+        key = clean_value.casefold()
+        if clean_value and key not in seen:
+            seen.add(key)
+            result.append(clean_value)
+    return result
+
+
+def _is_subjective_clarification_question(question: str | None) -> bool:
+    if not question or not question.strip():
+        return False
+    normalized = _normalize_for_match(question).strip(" ?!.,:")
+    return normalized not in {
+        "уточните",
+        "уточните вопрос",
+        "уточните пожалуйста",
+        "поясните",
+        "нужны уточнения",
+    }
+
+
+def _question_mentions_ambiguity(
+    question: str,
+    span: str,
+    meanings: list[str],
+) -> bool:
+    normalized = _normalize_for_match(question)
+    return _span_occurs_in_question(question, span) or any(
+        _normalize_for_match(meaning) in normalized for meaning in meanings
+    )
+
+
+def _missing_slot_question_is_relevant(
+    question: str | None,
+    missing_slots: list[str],
+) -> bool:
+    if not _is_subjective_clarification_question(question):
+        return False
+    normalized = _normalize_for_match(question or "")
+    for slot in _distinct_values(missing_slots):
+        if slot == "subject" and _contains_any(
+            normalized,
+            ("что именно", "о чем", "предмет", "под «этим»", "под этим"),
+        ):
+            return True
+        if slot == "document_type" and _contains_any(
+            normalized,
+            ("какие", "какой документ", "тип документ", "документ"),
+        ):
+            return True
+        if slot == "application_type" and _contains_any(
+            normalized,
+            ("какое", "какой тип заявления", "заявлен"),
+        ):
+            return True
+        if slot in normalized:
+            return True
+    return False
 
 
 def _sanitize_ckp_plan(plan: QueryPlan) -> QueryPlan:
@@ -723,7 +1601,8 @@ def _sanitize_ckp_plan(plan: QueryPlan) -> QueryPlan:
 
     preferred_sources = ["ИП-0003 ЦКП SERVICELINE"]
 
-    return QueryPlan(
+    return replace(
+        plan,
         intent="company_ckp",
         normalized_question=_FORBIDDEN_CKP_MEANING_RE.sub(
             "ценный конечный продукт",
@@ -734,7 +1613,6 @@ def _sanitize_ckp_plan(plan: QueryPlan) -> QueryPlan:
         answer_type=plan.answer_type if plan.answer_type in {"definition", "general"} else "definition",
         needs_clarification=False,
         clarification_question=None,
-        confidence=plan.confidence,
         notes=(
             _FORBIDDEN_CKP_MEANING_RE.sub("ценный конечный продукт", plan.notes)
             if plan.notes is not None
@@ -744,16 +1622,9 @@ def _sanitize_ckp_plan(plan: QueryPlan) -> QueryPlan:
 
 
 def _with_compatible_sources(plan: QueryPlan) -> QueryPlan:
-    return QueryPlan(
-        intent=plan.intent,
-        normalized_question=plan.normalized_question,
-        query_expansions=plan.query_expansions,
+    return replace(
+        plan,
         preferred_sources=_filter_compatible_sources(plan.preferred_sources, plan.intent),
-        answer_type=plan.answer_type,
-        needs_clarification=plan.needs_clarification,
-        clarification_question=plan.clarification_question,
-        confidence=plan.confidence,
-        notes=plan.notes,
     )
 
 
@@ -902,15 +1773,16 @@ def _is_company_identity_question(question: str) -> bool:
 
 
 def _is_roles_responsibility_question(question: str) -> bool:
-    return _contains_any(
+    return _is_explicit_responsibility_question(question) or _contains_any(
         question,
         (
-            "кто отвечает",
             "кто руководит",
             "кто главный",
             "начальник",
             "руководитель",
             "к кому обратиться",
+            "к кому обращаться",
+            "к кому идти",
             "кому направить",
             "контакт",
             "телефон",
@@ -940,31 +1812,13 @@ def _is_attendance_absence_question(question: str) -> bool:
 
 
 def _is_one_c_operational_lookup_question(question: str) -> bool:
-    return _contains_any(
-        question,
-        (
-            "цена",
-            "цену",
-            "стоимость детали",
-            "остатки",
-            "склад",
-            "складе",
-            "статус заказа",
-            "заказ",
-            "счет",
-            "счёт",
-            "счета",
-            "счёта",
-            "контрагент",
-            "контрагента",
-            "отгрузка",
-            "отгрузку",
-            "номенклатура",
-            "найди деталь",
-            "покажи счета",
-            "покажи счёта",
-            "покажи остатки",
-        ),
+    if _is_roles_responsibility_question(question) or _is_procedure_question(question):
+        return False
+    return (
+        _is_current_status_question(question)
+        or _is_availability_question(question)
+        or _is_price_question(question)
+        or _is_current_value_question(question)
     )
 
 
@@ -1041,6 +1895,44 @@ def _coerce_str_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def _clarification_from_mapping(
+    value: Any,
+    *,
+    legacy_required: bool,
+    legacy_question: str | None,
+) -> ClarificationPlan:
+    if not isinstance(value, dict):
+        return ClarificationPlan(
+            required=legacy_required,
+            question=legacy_question,
+        )
+    return ClarificationPlan(
+        required=(
+            _coerce_bool(value.get("required"))
+            if "required" in value
+            else legacy_required
+        ),
+        kind=_coerce_optional_str(value.get("kind")) or "none",
+        ambiguity_span=_coerce_optional_str(value.get("ambiguity_span")),
+        candidate_meanings=_coerce_str_list(value.get("candidate_meanings")),
+        missing_slots=_coerce_str_list(value.get("missing_slots")),
+        question=(
+            _coerce_optional_str(value.get("question"))
+            if "question" in value
+            else legacy_question
+        ),
+        confidence=_coerce_confidence(value.get("confidence")),
+    )
+
+
+def _legacy_clarification_from_plan(plan: QueryPlan) -> ClarificationPlan:
+    return ClarificationPlan(
+        required=plan.needs_clarification,
+        question=plan.clarification_question,
+        confidence=plan.confidence if plan.needs_clarification else 0.0,
+    )
 
 
 def _coerce_bool(value: Any) -> bool:

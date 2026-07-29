@@ -346,7 +346,37 @@ def test_query_plan_diagnostics_contains_runtime_metadata() -> None:
     assert result.query_plan == {
         "enabled": True,
         "intent": "org_structure",
+        "raw_intent": None,
         "answer_type": "list",
+        "requested_fact_type": "list",
+        "raw_requested_fact_type": None,
+        "temporal_scope": "static",
+        "raw_temporal_scope": None,
+        "subject": "отделы есть в компании",
+        "raw_subject": None,
+        "operational_lookup": False,
+        "operational_decision_reason": "static_requested_fact_type",
+        "query_plan_validation_reasons": [
+            "explicit_list_question",
+            "static_fact_type",
+            "subject_inferred",
+        ],
+        "needs_clarification": False,
+        "clarification_question": None,
+        "raw_clarification_required": False,
+        "validated_clarification_required": False,
+        "raw_clarification_kind": "none",
+        "validated_clarification_kind": "none",
+        "raw_ambiguity_span": None,
+        "validated_ambiguity_span": None,
+        "raw_candidate_meanings": [],
+        "validated_candidate_meanings": [],
+        "raw_missing_slots": [],
+        "validated_missing_slots": [],
+        "raw_clarification_question": None,
+        "validated_clarification_question": None,
+        "clarification_action": "continue_retrieval",
+        "clarification_validation_reasons": [],
         "normalized_question": "Какие подразделения есть в организационной структуре компании?",
         "query_expansions": [
             "оргсхема компании",
@@ -802,7 +832,7 @@ def test_kp_question_asks_clarification_without_llm() -> None:
     assert result.sources == []
     assert result.chunks_used == 0
     assert "коммерческое предложение" in result.answer
-    assert "ЦКП" in result.answer
+    assert "ценный конечный продукт" in result.answer
     assert client.messages == []
     assert retriever.calls == []
 

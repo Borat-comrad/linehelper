@@ -20,6 +20,35 @@ DEFAULT_FIXTURE = PROJECT_ROOT / "tests" / "fixtures" / "rag_architecture_v2_cas
 STATUS_VALUES = ("passed", "failed", "blocked", "not_applicable")
 OPERATIONAL_INTENT = "one_c_operational_lookup"
 EXACT_TEXT_KEYS = frozenset({"exact_answer", "expected_answer", "answer_text"})
+REQUESTED_FACT_TYPES = frozenset(
+    {
+        "definition",
+        "procedure",
+        "responsible_person",
+        "primary_contact",
+        "unit_head",
+        "document_recipient",
+        "list",
+        "comparison",
+        "current_status",
+        "current_value",
+        "price",
+        "availability",
+        "unknown",
+    }
+)
+CLARIFICATION_KINDS = frozenset(
+    {
+        "none",
+        "abbreviation",
+        "lexical_ambiguity",
+        "missing_subject",
+        "missing_object",
+        "missing_document_type",
+        "missing_scope",
+        "missing_required_slot",
+    }
+)
 
 
 class FixtureValidationError(ValueError):
@@ -114,6 +143,29 @@ def validate_fixture(payload: Any) -> None:
         if not isinstance(expected["clarification"], bool):
             raise FixtureValidationError(
                 f"{where}.expected.clarification must be boolean"
+            )
+        if expected["requested_fact_type"] not in REQUESTED_FACT_TYPES:
+            raise FixtureValidationError(
+                f"{where}.expected.requested_fact_type is invalid"
+            )
+        if (
+            "clarification_kind" in expected
+            and expected["clarification_kind"] not in CLARIFICATION_KINDS
+        ):
+            raise FixtureValidationError(
+                f"{where}.expected.clarification_kind is invalid"
+            )
+        for list_field in ("candidate_meanings", "missing_slots"):
+            if list_field in expected and not isinstance(expected[list_field], list):
+                raise FixtureValidationError(
+                    f"{where}.expected.{list_field} must be a list"
+                )
+        if "ambiguity_span" in expected and not isinstance(
+            expected["ambiguity_span"],
+            str,
+        ):
+            raise FixtureValidationError(
+                f"{where}.expected.ambiguity_span must be a string"
             )
         if not _as_expected_values(expected["intent"]):
             raise FixtureValidationError(f"{where}.expected.intent must not be empty")
@@ -290,6 +342,40 @@ def evaluate_case(
         diagnostic.get("clarification"),
         "needed",
     )
+    clarification = diagnostic.get("clarification")
+    if "clarification_kind" in expected:
+        _check_mapping_value(
+            checks,
+            "clarification_kind",
+            expected["clarification_kind"],
+            clarification,
+            "validated_kind",
+        )
+    if "ambiguity_span" in expected:
+        _check_mapping_value(
+            checks,
+            "ambiguity_span",
+            expected["ambiguity_span"],
+            clarification,
+            "ambiguity_span",
+            normalize_text=True,
+        )
+    if "candidate_meanings" in expected:
+        _check_mapping_subset(
+            checks,
+            "candidate_meanings",
+            expected["candidate_meanings"],
+            clarification,
+            "candidate_meanings",
+        )
+    if "missing_slots" in expected:
+        _check_mapping_subset(
+            checks,
+            "missing_slots",
+            expected["missing_slots"],
+            clarification,
+            "missing_slots",
+        )
     _check_boolean_mapping(
         checks,
         "operational_lookup",
@@ -410,6 +496,23 @@ def aggregate_metrics(
             expected_value=True,
             actual_value=False,
         ),
+        "valid_clarification_recall": _clarification_recall(
+            case_by_id,
+            selected_records,
+        ),
+        "invalid_clarification_rejection_rate": (
+            _invalid_clarification_rejection_rate(
+                case_by_id,
+                selected_records,
+            )
+        ),
+        "missing_slot_clarification_accuracy": _missing_slot_accuracy(
+            case_by_id,
+            selected_records,
+        ),
+        "retrieval_started_after_rejected_clarification": (
+            _retrieval_after_rejected_clarification(selected_records)
+        ),
         "operational_misroute_count": _boolean_mismatch_count(
             case_by_id,
             selected_records,
@@ -418,6 +521,22 @@ def aggregate_metrics(
             nested_key="operational_lookup",
             expected_value=False,
             actual_value=True,
+        ),
+        "missed_operational_count": _boolean_mismatch_count(
+            case_by_id,
+            selected_records,
+            expected_key="operational_lookup",
+            diagnostic_key="operational_boundary",
+            nested_key="operational_lookup",
+            expected_value=True,
+            actual_value=False,
+        ),
+        "requested_fact_type_availability": _requested_fact_type_availability(
+            selected_records
+        ),
+        "requested_fact_type_accuracy": _requested_fact_type_accuracy(
+            case_by_id,
+            selected_records,
         ),
         "required_chunk_recall_at_5": _required_artifact_rate(
             case_by_id,
@@ -461,6 +580,9 @@ def aggregate_metrics(
         selected_records,
         lambda case: "paired" in case.get("tags", []),
     )
+    metrics["paired_responsibility_status_pass_rate"] = (
+        _paired_responsibility_status_rate(case_by_id, selected_records)
+    )
     metrics["conversation_cases"] = _group_pass_rate(
         case_by_id,
         selected_records,
@@ -502,9 +624,49 @@ def build_repeatability(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         if len(case_records) < 2:
             continue
         dimensions = {
+            "raw_intent": [
+                _observable_scalar(record.get("raw_intent"))
+                for record in case_records
+            ],
             "intent": [_observable_scalar(record.get("intent")) for record in case_records],
+            "raw_requested_fact_type": [
+                _observable_scalar(record.get("raw_requested_fact_type"))
+                for record in case_records
+            ],
+            "requested_fact_type": [
+                _observable_scalar(record.get("requested_fact_type"))
+                for record in case_records
+            ],
+            "temporal_scope": [
+                _observable_scalar(record.get("temporal_scope"))
+                for record in case_records
+            ],
             "clarification": [
                 _observable_nested(record.get("clarification"), "needed")
+                for record in case_records
+            ],
+            "raw_clarification": [
+                _observable_nested(record.get("clarification"), "raw_required")
+                for record in case_records
+            ],
+            "clarification_kind": [
+                _observable_nested(record.get("clarification"), "validated_kind")
+                for record in case_records
+            ],
+            "ambiguity_span": [
+                _observable_nested(record.get("clarification"), "ambiguity_span")
+                for record in case_records
+            ],
+            "missing_slots": [
+                _observable_nested(record.get("clarification"), "missing_slots")
+                for record in case_records
+            ],
+            "clarification_action": [
+                _observable_nested(record.get("clarification"), "action")
+                for record in case_records
+            ],
+            "retrieval_started": [
+                _observable_nested(record.get("clarification"), "retrieval_started")
                 for record in case_records
             ],
             "operational_routing": [
@@ -536,6 +698,16 @@ def build_repeatability(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 _observable_scalar(_turn(record, turn_index).get("intent"))
                 for record in case_records
             ]
+            dimensions[f"turn_{turn_number}_requested_fact_type"] = [
+                _observable_scalar(
+                    _turn(record, turn_index).get("requested_fact_type")
+                )
+                for record in case_records
+            ]
+            dimensions[f"turn_{turn_number}_temporal_scope"] = [
+                _observable_scalar(_turn(record, turn_index).get("temporal_scope"))
+                for record in case_records
+            ]
             dimensions[f"turn_{turn_number}_clarification"] = [
                 _observable_nested(
                     _turn(record, turn_index).get("clarification"),
@@ -543,6 +715,21 @@ def build_repeatability(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 )
                 for record in case_records
             ]
+            for field in (
+                "raw_required",
+                "validated_kind",
+                "ambiguity_span",
+                "missing_slots",
+                "action",
+                "retrieval_started",
+            ):
+                dimensions[f"turn_{turn_number}_clarification_{field}"] = [
+                    _observable_nested(
+                        _turn(record, turn_index).get("clarification"),
+                        field,
+                    )
+                    for record in case_records
+                ]
             dimensions[f"turn_{turn_number}_operational_routing"] = [
                 _observable_nested(
                     _turn(record, turn_index).get("operational_boundary"),
@@ -789,6 +976,59 @@ def _check_boolean_mapping(
     checks.append(_check(name, passed, expected, actual, reason))
 
 
+def _check_mapping_value(
+    checks: list[dict[str, Any]],
+    name: str,
+    expected: Any,
+    actual_mapping: Any,
+    key: str,
+    *,
+    normalize_text: bool = False,
+) -> None:
+    actual = (
+        actual_mapping.get(key)
+        if isinstance(actual_mapping, Mapping) and is_available(actual_mapping)
+        else unavailable(f"{name} is not observable")
+    )
+    _check_value(
+        checks,
+        name,
+        expected,
+        actual,
+        normalize_text=normalize_text,
+    )
+
+
+def _check_mapping_subset(
+    checks: list[dict[str, Any]],
+    name: str,
+    expected: Sequence[Any],
+    actual_mapping: Any,
+    key: str,
+) -> None:
+    actual = (
+        actual_mapping.get(key)
+        if isinstance(actual_mapping, Mapping) and is_available(actual_mapping)
+        else unavailable(f"{name} is not observable")
+    )
+    if not isinstance(actual, list):
+        checks.append(_failed_check(name, list(expected), actual, f"{name} is not observable"))
+        return
+    normalized_actual = {_normalize(value) for value in actual}
+    missing = [
+        value for value in expected if _normalize(value) not in normalized_actual
+    ]
+    checks.append(
+        _check(
+            name,
+            not missing,
+            list(expected),
+            actual,
+            f"{name} matched" if not missing else f"{name} missing {missing!r}",
+        )
+    )
+
+
 def _check_artifacts(
     checks: list[dict[str, Any]],
     stage: str,
@@ -938,6 +1178,35 @@ def _check_turns(
                 expectation["ambiguity_span"],
                 span,
                 normalize_text=True,
+            )
+        clarification = (
+            actual.get("clarification")
+            if isinstance(actual, Mapping)
+            else None
+        )
+        if "clarification_kind" in expectation:
+            _check_mapping_value(
+                checks,
+                f"turn_{turn_number}_clarification_kind",
+                expectation["clarification_kind"],
+                clarification,
+                "validated_kind",
+            )
+        if "candidate_meanings" in expectation:
+            _check_mapping_subset(
+                checks,
+                f"turn_{turn_number}_candidate_meanings",
+                expectation["candidate_meanings"],
+                clarification,
+                "candidate_meanings",
+            )
+        if "missing_slots" in expectation:
+            _check_mapping_subset(
+                checks,
+                f"turn_{turn_number}_missing_slots",
+                expectation["missing_slots"],
+                clarification,
+                "missing_slots",
             )
 
 
@@ -1118,6 +1387,225 @@ def _boolean_mismatch_count(
         if expected is expected_value and actual is actual_value:
             count += 1
     return count if comparable else "not_available"
+
+
+def _clarification_recall(
+    case_by_id: Mapping[str, Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | str:
+    correct = 0
+    comparable = 0
+    for record in records:
+        if record.get("status") == "blocked":
+            continue
+        case = case_by_id[str(record["case_id"])]
+        if case["expected"].get("clarification") is not True:
+            continue
+        actual = _observable_nested(record.get("clarification"), "needed")
+        if not isinstance(actual, bool):
+            continue
+        comparable += 1
+        correct += int(actual)
+    return _rate(correct, comparable)
+
+
+def _invalid_clarification_rejection_rate(
+    case_by_id: Mapping[str, Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | str:
+    correct = 0
+    comparable = 0
+    for record in records:
+        if record.get("status") == "blocked":
+            continue
+        case = case_by_id[str(record["case_id"])]
+        clarification = record.get("clarification")
+        raw_required = _observable_nested(clarification, "raw_required")
+        validated_required = _observable_nested(
+            clarification,
+            "validated_required",
+        )
+        if (
+            case["expected"].get("clarification") is not False
+            or raw_required is not True
+            or not isinstance(validated_required, bool)
+        ):
+            continue
+        comparable += 1
+        correct += int(not validated_required)
+    return _rate(correct, comparable)
+
+
+def _missing_slot_accuracy(
+    case_by_id: Mapping[str, Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | str:
+    correct = 0
+    comparable = 0
+    for record in records:
+        if record.get("status") == "blocked":
+            continue
+        case = case_by_id[str(record["case_id"])]
+        expected_slots = case["expected"].get("missing_slots")
+        clarification = record.get("clarification")
+        actual_slots = (
+            clarification.get("missing_slots")
+            if isinstance(clarification, Mapping) and is_available(clarification)
+            else None
+        )
+        actual_required = _observable_nested(clarification, "validated_required")
+        if not isinstance(expected_slots, list) or not isinstance(actual_slots, list):
+            continue
+        comparable += 1
+        normalized_actual = {_normalize(value) for value in actual_slots}
+        correct += int(
+            actual_required is True
+            and all(_normalize(value) in normalized_actual for value in expected_slots)
+        )
+    return _rate(correct, comparable)
+
+
+def _retrieval_after_rejected_clarification(
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | str:
+    correct = 0
+    comparable = 0
+    for record in records:
+        clarification = record.get("clarification")
+        raw_required = _observable_nested(clarification, "raw_required")
+        validated_required = _observable_nested(
+            clarification,
+            "validated_required",
+        )
+        retrieval_started = _observable_nested(
+            clarification,
+            "retrieval_started",
+        )
+        if (
+            raw_required is not True
+            or validated_required is not False
+            or not isinstance(retrieval_started, bool)
+        ):
+            continue
+        comparable += 1
+        correct += int(retrieval_started)
+    return _rate(correct, comparable)
+
+
+def _rate(correct: int, comparable: int) -> dict[str, Any] | str:
+    if not comparable:
+        return "not_available"
+    return {
+        "correct": correct,
+        "comparable": comparable,
+        "rate": round(correct / comparable, 4),
+    }
+
+
+def _requested_fact_type_availability(
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | str:
+    comparable = [
+        record
+        for record in records
+        if record.get("status") != "blocked"
+    ]
+    if not comparable:
+        return "not_available"
+    available = sum(
+        1
+        for record in comparable
+        if isinstance(record.get("requested_fact_type"), str)
+    )
+    return {
+        "available": available,
+        "total": len(comparable),
+        "rate": round(available / len(comparable), 4),
+    }
+
+
+def _requested_fact_type_accuracy(
+    case_by_id: Mapping[str, Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | str:
+    correct = 0
+    comparable = 0
+    for record in records:
+        if record.get("status") == "blocked":
+            continue
+        actual = record.get("requested_fact_type")
+        if not isinstance(actual, str):
+            continue
+        expected = _as_expected_values(
+            case_by_id[str(record["case_id"])]["expected"].get(
+                "requested_fact_type"
+            )
+        )
+        if not expected:
+            continue
+        comparable += 1
+        if actual in expected:
+            correct += 1
+    if not comparable:
+        return "not_available"
+    return {
+        "correct": correct,
+        "comparable": comparable,
+        "rate": round(correct / comparable, 4),
+    }
+
+
+def _paired_responsibility_status_rate(
+    case_by_id: Mapping[str, Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | str:
+    pair_ids = {
+        "order_owner_vs_status",
+        "shipping_owner_vs_status",
+        "warehouse_owner_vs_inventory",
+        "payments_owner_vs_paid",
+    }
+    correct = 0
+    comparable = 0
+    blocked = 0
+    for record in records:
+        case = case_by_id[str(record["case_id"])]
+        if case.get("pair_id") not in pair_ids:
+            continue
+        if record.get("status") == "blocked":
+            blocked += 1
+            continue
+        actual_fact = record.get("requested_fact_type")
+        actual_operational = _observable_nested(
+            record.get("operational_boundary"),
+            "operational_lookup",
+        )
+        if not isinstance(actual_fact, str) or not isinstance(
+            actual_operational,
+            bool,
+        ):
+            continue
+        expected_fact = _as_expected_values(
+            case["expected"].get("requested_fact_type")
+        )
+        expected_operational = case["expected"].get("operational_lookup")
+        if not expected_fact or not isinstance(expected_operational, bool):
+            continue
+        comparable += 1
+        if (
+            actual_fact in expected_fact
+            and actual_operational is expected_operational
+        ):
+            correct += 1
+    if not comparable:
+        return "not_available"
+    return {
+        "cases": comparable,
+        "passed": correct,
+        "failed": comparable - correct,
+        "blocked": blocked,
+        "rate": round(correct / comparable, 4),
+    }
 
 
 def _required_artifact_rate(

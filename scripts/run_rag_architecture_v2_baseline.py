@@ -59,12 +59,6 @@ OBSERVABILITY_GAPS = {
         "RagAnswerGenerator.answer() accepts only one question string and does not "
         "expose conversation resolution"
     ),
-    "requested_fact_type": (
-        "current QueryPlan exposes intent and answer_type, but not the requested fact type"
-    ),
-    "ambiguity_span": (
-        "current QueryPlan diagnostics do not expose the fragment that caused clarification"
-    ),
     "merged_candidates": (
         "RagAnswer exposes selected sources and excluded diagnostic candidates, "
         "but not the post-merge candidate sequence"
@@ -310,22 +304,93 @@ def _run_full_case(
             if isinstance(query_plan, dict) and query_plan.get("intent")
             else unavailable("intent is absent from QueryPlan diagnostics")
         )
+        requested_fact_type = (
+            query_plan.get("requested_fact_type")
+            if isinstance(query_plan, dict)
+            and query_plan.get("requested_fact_type")
+            else unavailable(
+                "requested_fact_type is absent from QueryPlan diagnostics"
+            )
+        )
+        temporal_scope = (
+            query_plan.get("temporal_scope")
+            if isinstance(query_plan, dict) and query_plan.get("temporal_scope")
+            else unavailable("temporal_scope is absent from QueryPlan diagnostics")
+        )
+        subject = (
+            query_plan.get("subject")
+            if isinstance(query_plan, dict) and query_plan.get("subject")
+            else unavailable("subject is absent from QueryPlan diagnostics")
+        )
         operational_boundary = (
             {
                 "available": True,
-                "operational_lookup": intent == "one_c_operational_lookup",
-                "derived_from": "query_plan.intent",
-                "native_decision_exposed": False,
+                "operational_lookup": query_plan["operational_lookup"],
+                "decision_reason": query_plan.get(
+                    "operational_decision_reason",
+                    "not_exposed",
+                ),
+                "derived_from": "query_plan.operational_lookup",
+                "native_decision_exposed": True,
             }
-            if isinstance(intent, str)
-            else unavailable("intent is unavailable")
+            if isinstance(query_plan, dict)
+            and isinstance(query_plan.get("operational_lookup"), bool)
+            else unavailable(
+                "operational_lookup is absent from QueryPlan diagnostics"
+            )
         )
-        clarification = {
-            "available": True,
-            "needed": result.response_kind == "clarification",
-            "ambiguity_span": unavailable(OBSERVABILITY_GAPS["ambiguity_span"]),
-            "derived_from": "RagAnswer.response_kind",
-        }
+        clarification = (
+            {
+                "available": True,
+                "needed": query_plan["validated_clarification_required"],
+                "raw_required": query_plan.get(
+                    "raw_clarification_required",
+                    False,
+                ),
+                "validated_required": query_plan[
+                    "validated_clarification_required"
+                ],
+                "raw_kind": query_plan.get("raw_clarification_kind", "none"),
+                "validated_kind": query_plan.get(
+                    "validated_clarification_kind",
+                    "none",
+                ),
+                "raw_ambiguity_span": query_plan.get("raw_ambiguity_span"),
+                "ambiguity_span": query_plan.get("validated_ambiguity_span"),
+                "raw_candidate_meanings": query_plan.get(
+                    "raw_candidate_meanings",
+                    [],
+                ),
+                "candidate_meanings": query_plan.get(
+                    "validated_candidate_meanings",
+                    [],
+                ),
+                "raw_missing_slots": query_plan.get("raw_missing_slots", []),
+                "missing_slots": query_plan.get("validated_missing_slots", []),
+                "raw_question": query_plan.get("raw_clarification_question"),
+                "question": query_plan.get(
+                    "validated_clarification_question"
+                ),
+                "action": query_plan.get(
+                    "clarification_action",
+                    "continue_retrieval",
+                ),
+                "validation_reasons": query_plan.get(
+                    "clarification_validation_reasons",
+                    [],
+                ),
+                "retrieval_started": bool(retriever.calls),
+                "derived_from": "native_query_plan_clarification",
+            }
+            if isinstance(query_plan, dict)
+            and isinstance(
+                query_plan.get("validated_clarification_required"),
+                bool,
+            )
+            else unavailable(
+                "structured clarification is absent from QueryPlan diagnostics"
+            )
+        )
         turn = {
             "case_id": case["id"],
             "repeat_index": repeat_index,
@@ -333,8 +398,28 @@ def _run_full_case(
             "original_question": question,
             "resolved_question": unavailable(OBSERVABILITY_GAPS["resolved_question"]),
             "query_plan": query_plan,
-            "requested_fact_type": unavailable(
-                OBSERVABILITY_GAPS["requested_fact_type"]
+            "requested_fact_type": requested_fact_type,
+            "raw_requested_fact_type": (
+                query_plan.get("raw_requested_fact_type")
+                if isinstance(query_plan, dict)
+                else unavailable("QueryPlan diagnostics are unavailable")
+            ),
+            "temporal_scope": temporal_scope,
+            "raw_temporal_scope": (
+                query_plan.get("raw_temporal_scope")
+                if isinstance(query_plan, dict)
+                else unavailable("QueryPlan diagnostics are unavailable")
+            ),
+            "subject": subject,
+            "raw_subject": (
+                query_plan.get("raw_subject")
+                if isinstance(query_plan, dict)
+                else unavailable("QueryPlan diagnostics are unavailable")
+            ),
+            "raw_intent": (
+                query_plan.get("raw_intent")
+                if isinstance(query_plan, dict)
+                else unavailable("QueryPlan diagnostics are unavailable")
             ),
             "intent": intent,
             "clarification": clarification,
@@ -431,6 +516,18 @@ def _run_retrieval_only_case(
                 "requested_fact_type": unavailable(
                     "not executed in retrieval-only mode"
                 ),
+                "raw_requested_fact_type": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "temporal_scope": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "raw_temporal_scope": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "subject": unavailable("not executed in retrieval-only mode"),
+                "raw_subject": unavailable("not executed in retrieval-only mode"),
+                "raw_intent": unavailable("not executed in retrieval-only mode"),
                 "intent": unavailable("not executed in retrieval-only mode"),
                 "clarification": unavailable(
                     "not executed in retrieval-only mode"
@@ -509,6 +606,12 @@ def _empty_diagnostic(
         "resolved_question": marker,
         "query_plan": marker,
         "requested_fact_type": marker,
+        "raw_requested_fact_type": marker,
+        "temporal_scope": marker,
+        "raw_temporal_scope": marker,
+        "subject": marker,
+        "raw_subject": marker,
+        "raw_intent": marker,
         "intent": marker,
         "clarification": marker,
         "operational_boundary": marker,

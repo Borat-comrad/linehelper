@@ -40,7 +40,6 @@ from linehelper.llm.answer_generator import (  # noqa: E402
     _runtime_query_intent,
     has_sufficient_context,
     select_context_chunks,
-    should_ask_clarification,
     strip_trailing_source_block,
 )
 from linehelper.llm.ollama_client import (  # noqa: E402
@@ -427,7 +426,6 @@ def _run_generation_pipeline(
     normalized_query = getattr(query_plan, "normalized_question", None) or normalize_question(question)
     detected_intent = getattr(query_plan, "intent", None) or "unknown"
     clarification = _query_plan_clarification(query_plan) if query_plan is not None else None
-    clarification = clarification or should_ask_clarification(question)
     if clarification is not None:
         return {
             "query_plan": _plan_to_dict(query_plan),

@@ -28,9 +28,6 @@ NO_ANSWER_MESSAGE = (
     "Похоже, вопрос не относится к корпоративным регламентам, инструкциям, "
     "оргструктуре или документообороту."
 )
-CLARIFY_KP_MESSAGE = (
-    "Вы имеете в виду КП как коммерческое предложение или ЦКП как ценный конечный продукт компании?"
-)
 KP_COMMERCIAL_OFFER_MESSAGE = (
     "В базе знаний нет отдельной полной инструкции по КП как коммерческому предложению. "
     "В найденных источниках могут встречаться упоминания коммерческого предложения как продукта "
@@ -333,9 +330,7 @@ class RagAnswerGenerator:
         query_plan = query_analysis.plan
         query_plan_diagnostics = query_analysis.diagnostics
 
-        clarification = _query_plan_clarification(
-            query_plan
-        ) or should_ask_clarification(clean_question)
+        clarification = _query_plan_clarification(query_plan)
         if clarification is not None:
             return RagAnswer(
                 question=clean_question,
@@ -504,6 +499,9 @@ class RagAnswerGenerator:
 
         try:
             query_plan = self.query_analyzer.analyze(question)
+            from linehelper.rag.query_analyzer import validate_query_plan
+
+            query_plan = validate_query_plan(query_plan, question)
         except Exception as exc:
             return QueryAnalysisResult(
                 plan=None,
@@ -558,10 +556,60 @@ class RagAnswerGenerator:
         )
 
 def _query_plan_diagnostics(query_plan: QueryPlan) -> dict[str, Any]:
+    raw_clarification = query_plan.raw_clarification
+    validated_clarification = query_plan.clarification
     return {
         "enabled": True,
         "intent": query_plan.intent,
+        "raw_intent": query_plan.raw_intent,
         "answer_type": query_plan.answer_type,
+        "requested_fact_type": query_plan.requested_fact_type,
+        "raw_requested_fact_type": query_plan.raw_requested_fact_type,
+        "temporal_scope": query_plan.temporal_scope,
+        "raw_temporal_scope": query_plan.raw_temporal_scope,
+        "subject": query_plan.subject,
+        "raw_subject": query_plan.raw_subject,
+        "operational_lookup": query_plan.operational_lookup,
+        "operational_decision_reason": query_plan.operational_decision_reason,
+        "query_plan_validation_reasons": list(query_plan.validation_reasons),
+        "needs_clarification": query_plan.needs_clarification,
+        "clarification_question": query_plan.clarification_question,
+        "raw_clarification_required": (
+            raw_clarification.required if raw_clarification is not None else False
+        ),
+        "validated_clarification_required": validated_clarification.required,
+        "raw_clarification_kind": (
+            raw_clarification.kind if raw_clarification is not None else "none"
+        ),
+        "validated_clarification_kind": validated_clarification.kind,
+        "raw_ambiguity_span": (
+            raw_clarification.ambiguity_span
+            if raw_clarification is not None
+            else None
+        ),
+        "validated_ambiguity_span": validated_clarification.ambiguity_span,
+        "raw_candidate_meanings": (
+            list(raw_clarification.candidate_meanings)
+            if raw_clarification is not None
+            else []
+        ),
+        "validated_candidate_meanings": list(
+            validated_clarification.candidate_meanings
+        ),
+        "raw_missing_slots": (
+            list(raw_clarification.missing_slots)
+            if raw_clarification is not None
+            else []
+        ),
+        "validated_missing_slots": list(validated_clarification.missing_slots),
+        "raw_clarification_question": (
+            raw_clarification.question if raw_clarification is not None else None
+        ),
+        "validated_clarification_question": validated_clarification.question,
+        "clarification_action": query_plan.clarification_action,
+        "clarification_validation_reasons": list(
+            query_plan.clarification_validation_reasons
+        ),
         "normalized_question": query_plan.normalized_question,
         "query_expansions": list(query_plan.query_expansions),
         "preferred_sources": list(query_plan.preferred_sources),
@@ -578,6 +626,8 @@ def _query_plan_error_diagnostics(exc: Exception) -> dict[str, Any]:
 
 
 def _query_plan_is_usable(query_plan: QueryPlan) -> bool:
+    if query_plan.clarification_action == "clarify":
+        return True
     if query_plan.intent == "unknown":
         return False
     return bool(
@@ -588,19 +638,18 @@ def _query_plan_is_usable(query_plan: QueryPlan) -> bool:
 
 
 def _query_plan_clarification(query_plan: QueryPlan | None) -> str | None:
-    if query_plan is None or not query_plan.needs_clarification:
+    if query_plan is None or query_plan.clarification_action != "clarify":
         return None
-    if query_plan.clarification_question:
-        return query_plan.clarification_question
-    if query_plan.answer_type == "clarification":
-        return CLARIFY_KP_MESSAGE
-    return None
+    return query_plan.clarification.question
 
 
 def _runtime_query_intent(question: str, query_plan: QueryPlan | None) -> QueryIntent:
     old_intent = detect_query_intent(question)
     if query_plan is None:
         return old_intent
+
+    if query_plan.operational_lookup:
+        return QueryIntent(name="one_c_operational_lookup", require_preferred_context=True)
 
     if query_plan.intent == "company_ckp":
         return _intent("ckp", require_preferred_context=True)
@@ -785,10 +834,10 @@ def detect_query_intent(question: str) -> QueryIntent:
 
 
 def should_ask_clarification(question: str) -> str | None:
-    """Return a clarification answer for ambiguous short abbreviations."""
-    if detect_query_intent(question).name == "kp_ambiguous":
-        return CLARIFY_KP_MESSAGE
-    return None
+    """Compatibility helper backed by the validated fallback QueryPlan."""
+    from linehelper.rag.query_analyzer import fallback_query_plan
+
+    return _query_plan_clarification(fallback_query_plan(question))
 
 
 def select_context_chunks(
