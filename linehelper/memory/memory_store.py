@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,17 @@ from linehelper.memory.schema import MEMORY_SCHEMA_SQL
 
 
 ALLOWED_NAMESPACES = frozenset({"semantic", "episodic"})
+ALLOWED_FTS_MATCH_MODES = frozenset({"all", "any", "prefix_any"})
+ALLOWED_METADATA_FILTERS = frozenset(
+    {
+        "knowledge_domain",
+        "logical_unit_title",
+        "logical_unit_type",
+        "record_key",
+        "source_file",
+        "source_version",
+    }
+)
 
 
 def _utc_now_iso() -> str:
@@ -243,6 +255,95 @@ class MemoryStore:
 
         return [self._row_to_result(row) for row in rows]
 
+    def search_fts_terms(
+        self,
+        terms: Sequence[str],
+        *,
+        match_mode: str = "all",
+        namespace: str | None = None,
+        limit: int = 5,
+        doc_types: Sequence[str] | None = None,
+        metadata_filters: Mapping[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Search FTS with a structured, internally generated MATCH expression.
+
+        Unlike ``search_fts``, this read-only API preserves safe prefix queries
+        needed by retrieval planning. Callers provide terms, not raw FTS
+        syntax, so operators cannot be injected through user text.
+        """
+        if match_mode not in ALLOWED_FTS_MATCH_MODES:
+            allowed = ", ".join(sorted(ALLOWED_FTS_MATCH_MODES))
+            raise ValueError(
+                f"Invalid FTS match mode: {match_mode!r}. Allowed modes: {allowed}"
+            )
+        if namespace is not None:
+            _validate_namespace(namespace)
+        _validate_limit(limit)
+        _validate_metadata_filters(metadata_filters)
+
+        fts_query = _structured_fts_query(terms, match_mode=match_mode)
+        if not fts_query:
+            return []
+
+        sql = _search_select_sql() + " WHERE memory_chunks_fts MATCH ?"
+        params: list[Any] = [fts_query]
+        sql, params = _append_read_filters(
+            sql,
+            params,
+            namespace=namespace,
+            doc_types=doc_types,
+            metadata_filters=metadata_filters,
+        )
+        sql += " ORDER BY score, memory_chunks.id LIMIT ?"
+        params.append(limit)
+
+        with self._connect() as connection:
+            rows = connection.execute(sql, params).fetchall()
+
+        return [self._row_to_result(row) for row in rows]
+
+    def search_chunks_by_metadata(
+        self,
+        *,
+        namespace: str | None = None,
+        source: str | None = None,
+        doc_types: Sequence[str] | None = None,
+        metadata_filters: Mapping[str, Any] | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return chunks through exact read-only metadata/source filters."""
+        if namespace is not None:
+            _validate_namespace(namespace)
+        _validate_limit(limit)
+        _validate_metadata_filters(metadata_filters)
+        if (
+            namespace is None
+            and not source
+            and not doc_types
+            and not metadata_filters
+        ):
+            raise ValueError("at least one metadata/source filter is required")
+
+        sql = _chunk_select_sql() + " WHERE 1 = 1"
+        params: list[Any] = []
+        sql, params = _append_read_filters(
+            sql,
+            params,
+            namespace=namespace,
+            doc_types=doc_types,
+            metadata_filters=metadata_filters,
+        )
+        if source:
+            sql += " AND memory_chunks.source = ?"
+            params.append(source)
+        sql += " ORDER BY memory_chunks.id LIMIT ?"
+        params.append(limit)
+
+        with self._connect() as connection:
+            rows = connection.execute(sql, params).fetchall()
+
+        return [self._row_to_result(row) for row in rows]
+
     def delete_chunk(self, chunk_id: int) -> bool:
         """Delete one memory chunk by id. Return True if a row was deleted."""
         with self._connect() as connection:
@@ -355,3 +456,132 @@ class MemoryStore:
             parts.append(f"result={result}")
 
         return " | ".join(parts)
+
+
+def _search_select_sql() -> str:
+    return """
+        SELECT
+            memory_chunks.id,
+            memory_chunks.namespace,
+            memory_chunks.doc_type,
+            memory_chunks.title,
+            memory_chunks.text,
+            memory_chunks.source,
+            memory_chunks.page,
+            memory_chunks.section,
+            memory_chunks.created_at,
+            memory_chunks.expires_at,
+            memory_chunks.priority,
+            memory_chunks.confidence,
+            memory_chunks.metadata_json,
+            bm25(memory_chunks_fts) AS score
+        FROM memory_chunks_fts
+        JOIN memory_chunks
+            ON memory_chunks_fts.rowid = memory_chunks.id
+    """
+
+
+def _chunk_select_sql() -> str:
+    return """
+        SELECT
+            memory_chunks.id,
+            memory_chunks.namespace,
+            memory_chunks.doc_type,
+            memory_chunks.title,
+            memory_chunks.text,
+            memory_chunks.source,
+            memory_chunks.page,
+            memory_chunks.section,
+            memory_chunks.created_at,
+            memory_chunks.expires_at,
+            memory_chunks.priority,
+            memory_chunks.confidence,
+            memory_chunks.metadata_json,
+            NULL AS score
+        FROM memory_chunks
+    """
+
+
+def _append_read_filters(
+    sql: str,
+    params: list[Any],
+    *,
+    namespace: str | None,
+    doc_types: Sequence[str] | None,
+    metadata_filters: Mapping[str, Any] | None,
+) -> tuple[str, list[Any]]:
+    if namespace is not None:
+        sql += " AND memory_chunks.namespace = ?"
+        params.append(namespace)
+
+    clean_doc_types = tuple(
+        dict.fromkeys(str(value).strip() for value in doc_types or () if str(value).strip())
+    )
+    if clean_doc_types:
+        placeholders = ", ".join("?" for _ in clean_doc_types)
+        sql += f" AND memory_chunks.doc_type IN ({placeholders})"
+        params.extend(clean_doc_types)
+
+    for key, value in (metadata_filters or {}).items():
+        path = f"$.{key}"
+        values = (
+            tuple(value)
+            if isinstance(value, Sequence) and not isinstance(value, (str, bytes))
+            else (value,)
+        )
+        values = tuple(item for item in values if item is not None)
+        if not values:
+            sql += " AND 0 = 1"
+            continue
+        if len(values) == 1:
+            sql += " AND json_extract(memory_chunks.metadata_json, ?) = ?"
+            params.extend((path, values[0]))
+            continue
+        placeholders = ", ".join("?" for _ in values)
+        sql += (
+            " AND json_extract(memory_chunks.metadata_json, ?) "
+            f"IN ({placeholders})"
+        )
+        params.append(path)
+        params.extend(values)
+
+    return sql, params
+
+
+def _validate_metadata_filters(
+    metadata_filters: Mapping[str, Any] | None,
+) -> None:
+    unknown = set(metadata_filters or {}).difference(ALLOWED_METADATA_FILTERS)
+    if unknown:
+        names = ", ".join(sorted(unknown))
+        raise ValueError(f"Unsupported metadata filter(s): {names}")
+
+
+def _structured_fts_query(
+    terms: Sequence[str],
+    *,
+    match_mode: str,
+) -> str:
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        for token in re.findall(r"[0-9A-Za-zА-Яа-яЁё_]+", str(term)):
+            key = token.casefold()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            tokens.append(token)
+    if not tokens:
+        return ""
+
+    if match_mode == "prefix_any":
+        expressions = [
+            f"{token}*" if len(token) >= 3 else f'"{token}"'
+            for token in tokens
+        ]
+        return " OR ".join(expressions)
+
+    expressions = [f'"{token}"' for token in tokens]
+    if match_mode == "any":
+        return " OR ".join(expressions)
+    return " ".join(expressions)

@@ -21,10 +21,11 @@ def test_fixture_loads_all_core_and_neighbor_cases() -> None:
     fixture = harness.load_fixture(FIXTURE_PATH)
     ids = {case["id"] for case in fixture["cases"]}
 
-    assert len(fixture["cases"]) == 63
+    assert len(fixture["cases"]) == 71
     assert {"T01", "T02", "T03", "T04", "T05A", "T05B", "T06", "T07", "T08", "T09"} <= ids
     assert len([case for case in fixture["cases"] if "paired" in case["tags"]]) == 8
     assert {f"CR{index:02d}" for index in range(1, 13)} <= ids
+    assert {f"MR{index:02d}" for index in range(1, 9)} <= ids
 
 
 def test_fixture_rejects_duplicate_ids() -> None:
@@ -57,6 +58,27 @@ def test_fixture_rejects_unknown_resolution_kind() -> None:
 
     with pytest.raises(harness.FixtureValidationError, match="resolution_kind"):
         harness.validate_fixture(fixture)
+
+
+def test_fixture_rejects_unknown_retrieval_stage() -> None:
+    fixture = harness.load_fixture(FIXTURE_PATH)
+    fixture["cases"][-1]["expected"]["required_retrieval_stages"] = ["magic"]
+
+    with pytest.raises(harness.FixtureValidationError, match="retrieval_stages"):
+        harness.validate_fixture(fixture)
+
+
+def test_fixture_accepts_stable_sections_and_fact_type_alternatives() -> None:
+    fixture = harness.load_fixture(FIXTURE_PATH)
+    case = next(case for case in fixture["cases"] if case["id"] == "MR06")
+
+    assert case["expected"]["required_retrieval"]["sections"] == [
+        "Кадровые документы",
+        "Официальная переписка",
+        "Внутреннее взаимодействие",
+        "Передача оригиналов документов",
+    ]
+    assert isinstance(_case("MR04")["expected"]["requested_fact_type"], list)
 
 
 def test_select_cases_filters_by_ids_and_group() -> None:
@@ -287,6 +309,87 @@ def test_aggregate_metrics_computes_recall_and_context_rates() -> None:
     assert metrics["required_chunk_in_context_rate"]["rate"] == 1.0
 
 
+def test_evaluator_checks_retrieval_stage_and_required_rank() -> None:
+    case = _case("MR03")
+    candidate = _candidate(
+        chunk_id=47,
+        title="Инструкция Согласования командировки в Документообороте",
+        source="Инструкция Согласования командировки в Документообороте",
+        retrieval_rank=4,
+        stage_hits=[
+            {
+                "stage": "exact_identifier",
+                "query": "СЗ_Командировка",
+                "raw_score": 12.0,
+                "rank": 1,
+            }
+        ],
+    )
+    diagnostic = _diagnostic(
+        intent="business_trip",
+        requested_fact_type="procedure",
+        raw_candidates=[candidate],
+    )
+    diagnostic["retrieval_stages"] = [
+        {"name": "exact_identifier", "query": "СЗ_Командировка"}
+    ]
+
+    evaluation = harness.evaluate_case(case, diagnostic)
+
+    assert not any(
+        check["name"] in {"retrieval_stages", "required_candidate_rank"}
+        and not check["passed"]
+        for check in evaluation["checks"]
+    )
+
+
+def test_retrieval_metrics_cover_provenance_dedupe_and_latency() -> None:
+    case = _case("MR03")
+    candidate = _candidate(
+        chunk_id=47,
+        title="Инструкция Согласования командировки в Документообороте",
+        source="Инструкция Согласования командировки в Документообороте",
+        retrieval_rank=1,
+        stage_hits=[
+            {
+                "stage": "exact_identifier",
+                "query": "СЗ_Командировка",
+                "raw_score": 10.0,
+                "rank": 1,
+            }
+        ],
+    )
+    diagnostic = _diagnostic(
+        intent="business_trip",
+        requested_fact_type="procedure",
+        raw_candidates=[candidate],
+    )
+    diagnostic.update(
+        {
+            "case_id": "MR03",
+            "retrieval_stages": [
+                {"name": "exact_identifier", "query": "СЗ_Командировка"}
+            ],
+            "duplicate_count": 2,
+            "best_score_dedupe_correct": 2,
+            "best_score_dedupe_checks": 2,
+            "retrieval_duration_ms": 12.5,
+        }
+    )
+    record = harness.apply_evaluation(case, diagnostic)
+
+    metrics = harness.aggregate_metrics([case], [record])
+
+    assert metrics["required_candidate_recall_at_5"]["rate"] == 1.0
+    assert metrics["exact_identifier_recall"]["rate"] == 1.0
+    assert metrics["candidate_provenance_coverage"]["rate"] == 1.0
+    assert metrics["duplicate_candidates_before_merge"] == 2
+    assert metrics["duplicate_candidates_after_merge"] == 0
+    assert metrics["best_score_dedupe_accuracy"]["rate"] == 1.0
+    assert metrics["retrieval_latency_p50"] == 12.5
+    assert metrics["retrieval_latency_p95"] == 12.5
+
+
 def test_query_plan_v2_metrics_measure_availability_accuracy_and_missed_routes() -> None:
     cases = [_case("PI01"), _case("PI02")]
     responsibility = _diagnostic(
@@ -477,6 +580,34 @@ def test_repeatability_ignores_final_text_and_compares_architecture() -> None:
     repeatability = harness.build_repeatability([first, second])
 
     assert repeatability["T09"]["all_available_dimensions_stable"] is True
+
+
+def test_repeatability_compares_retrieval_plan_and_candidate_order() -> None:
+    first = _diagnostic(
+        raw_candidates=[
+            _candidate(chunk_id=29, retrieval_rank=1),
+            _candidate(chunk_id=47, retrieval_rank=2),
+        ]
+    )
+    first.update(
+        {
+            "case_id": "T03",
+            "retrieval_stages": [
+                {"name": "procedure_lookup", "query": "новое оборудование"}
+            ],
+            "stage_queries": {
+                "procedure_lookup": ["новое оборудование"]
+            },
+        }
+    )
+    second = copy.deepcopy(first)
+
+    repeatability = harness.build_repeatability([first, second])
+
+    dimensions = repeatability["T03"]["dimensions"]
+    assert dimensions["retrieval_stages"]["stable"] is True
+    assert dimensions["stage_queries"]["stable"] is True
+    assert dimensions["candidate_order_top_10"]["stable"] is True
 
 
 def test_repeatability_compares_resolved_conversation_dimensions() -> None:
@@ -848,6 +979,7 @@ def _candidate(
     section: str = "Маршрут ответственности",
     score: float = 120.0,
     retrieval_rank: int | None = None,
+    stage_hits: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     value = {
         "chunk_id": chunk_id,
@@ -857,6 +989,7 @@ def _candidate(
         "section": section,
         "score": score,
         "metadata": {"record_key": record_key} if record_key else {},
+        "stage_hits": [] if stage_hits is None else stage_hits,
     }
     if retrieval_rank is not None:
         value["retrieval_rank"] = retrieval_rank

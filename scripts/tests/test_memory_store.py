@@ -157,6 +157,123 @@ def test_search_fts_accepts_punctuated_user_question(tmp_path):
     assert len(results) == 1
 
 
+def test_search_fts_terms_preserves_safe_prefix_and_filters_metadata(tmp_path):
+    store = make_store(tmp_path)
+    store.ensure_schema()
+    expected = store.add_chunk(
+        namespace="semantic",
+        doc_type="reference",
+        text="В заявке нужно описать, о каком оборудовании и имуществе идёт речь.",
+        metadata={"logical_unit_type": "procedure"},
+    )
+    store.add_chunk(
+        namespace="semantic",
+        doc_type="reference",
+        text="Складское оборудование учитывается отдельно.",
+        metadata={"logical_unit_type": "reference_block"},
+    )
+
+    results = store.search_fts_terms(
+        ["оборудован", "имуществ", "заявк"],
+        match_mode="prefix_any",
+        namespace="semantic",
+        metadata_filters={"logical_unit_type": "procedure"},
+    )
+
+    assert [result["id"] for result in results] == [expected]
+
+
+def test_search_fts_terms_filters_doc_types_without_raw_fts_expression(tmp_path):
+    store = make_store(tmp_path)
+    store.ensure_schema()
+    expected = store.add_chunk(
+        namespace="semantic",
+        doc_type="organization_unit",
+        text="Внутренний документооборот: назначенный сотрудник.",
+    )
+    store.add_chunk(
+        namespace="semantic",
+        doc_type="document_flow_policy",
+        text="Внутренний документооборот регулируется политикой.",
+    )
+
+    results = store.search_fts_terms(
+        ["внутренн", "документооборот"],
+        match_mode="prefix_any",
+        namespace="semantic",
+        doc_types=["organization_unit"],
+    )
+
+    assert [result["id"] for result in results] == [expected]
+
+
+def test_search_chunks_by_metadata_supports_stable_sibling_lookup(tmp_path):
+    store = make_store(tmp_path)
+    store.ensure_schema()
+    source = "data/raw_docs/policy.pdf"
+    expected = [
+        store.add_chunk(
+            namespace="semantic",
+            doc_type="document_flow_policy",
+            title="Policy",
+            source=source,
+            text=f"Правило {index}",
+            metadata={
+                "logical_unit_type": "policy_rule",
+                "source_file": "policy.pdf",
+            },
+        )
+        for index in range(1, 5)
+    ]
+    store.add_chunk(
+        namespace="semantic",
+        doc_type="document_flow_policy",
+        title="Policy",
+        source=source,
+        text="Несвязанный пример",
+        metadata={
+            "logical_unit_type": "example",
+            "source_file": "policy.pdf",
+        },
+    )
+
+    results = store.search_chunks_by_metadata(
+        namespace="semantic",
+        source=source,
+        metadata_filters={"logical_unit_type": "policy_rule"},
+    )
+
+    assert [result["id"] for result in results] == expected
+
+
+@pytest.mark.parametrize(
+    ("method", "kwargs"),
+    [
+        (
+            "search_fts_terms",
+            {
+                "terms": ["test"],
+                "metadata_filters": {"unsupported_key": "value"},
+            },
+        ),
+        (
+            "search_chunks_by_metadata",
+            {"metadata_filters": {"unsupported_key": "value"}},
+        ),
+    ],
+)
+def test_read_only_metadata_search_rejects_unknown_filter(
+    tmp_path,
+    method,
+    kwargs,
+):
+    store = make_store(tmp_path)
+    store.ensure_schema()
+
+    with pytest.raises(ValueError, match="Unsupported metadata filter"):
+        getattr(store, method)(**kwargs)
+
+
 def test_save_experience_stores_episodic_proposal_experience(tmp_path):
     store = make_store(tmp_path)
     store.ensure_schema()

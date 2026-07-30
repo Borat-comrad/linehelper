@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
-from dataclasses import dataclass
+import time
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -126,6 +127,78 @@ _STOP_WORDS = frozenset(
     }
 )
 _MAX_EXCERPT_CHARS = 450
+RETRIEVAL_STAGE_NAMES = frozenset(
+    {
+        "exact_identifier",
+        "exact_entity",
+        "exact_subject",
+        "fts_resolved_question",
+        "fts_normalized_question",
+        "fts_query_expansion",
+        "procedure_lookup",
+        "organization_function_lookup",
+        "preferred_source_lookup",
+        "sibling_lookup",
+    }
+)
+ORGANIZATION_FUNCTION_FACT_TYPES = frozenset(
+    {
+        "responsible_person",
+        "primary_contact",
+        "unit_head",
+        "document_recipient",
+    }
+)
+ORGANIZATION_RETRIEVAL_DOC_TYPES = (
+    "employee_role",
+    "organization_unit",
+    "responsibility_route",
+    "role_combination",
+)
+STAGE_SCORE_WEIGHTS: dict[str, float] = {
+    "exact_identifier": 220.0,
+    "exact_entity": 180.0,
+    "organization_function_lookup": 200.0,
+    "procedure_lookup": 180.0,
+    "exact_subject": 140.0,
+    "preferred_source_lookup": 100.0,
+    "fts_resolved_question": 80.0,
+    "fts_normalized_question": 70.0,
+    "fts_query_expansion": 30.0,
+    "sibling_lookup": 20.0,
+}
+_MAX_FTS_SCORE_COMPONENT = 120.0
+_MAX_RERANK_SCORE_COMPONENT = 120.0
+_METADATA_MATCH_BONUS = 15.0
+_POLICY_CODE_RE = re.compile(r"\b[А-ЯЁA-Z]{1,4}[-_]\d{3,8}\b", re.IGNORECASE)
+_UNIT_IDENTIFIER_RE = re.compile(
+    r"\b(?P<label>отделение|отдел(?:ом|а|е|у)?|служба)"
+    r"\s+(?P<number>\d+[А-ЯЁA-Z]?)\b",
+    re.IGNORECASE,
+)
+_FORM_IDENTIFIER_RE = re.compile(
+    r"\b[А-ЯЁA-Z]{1,4}[_-][А-ЯЁа-яёA-Za-z][А-ЯЁа-яёA-Za-z0-9_-]{2,}\b"
+)
+_LATIN_BRAND_RE = re.compile(r"\b[A-Z][A-Z0-9-]{2,}\b")
+_PERSON_TOKEN_RE = re.compile(r"\b[А-ЯЁ][а-яё]{4,}\b")
+_ENTITY_STOP_WORDS = frozenset(
+    {
+        "Как",
+        "Какие",
+        "Какой",
+        "Кому",
+        "Кто",
+        "Когда",
+        "Можно",
+        "Нужно",
+        "Что",
+        "Где",
+        "Куда",
+        "Почему",
+        "Перечисли",
+        "Расскажи",
+    }
+)
 _MORPHOLOGY_HINTS: dict[str, list[str]] = {
     "согласовать": ["согласование"],
     "согласоватьь": ["согласование"],
@@ -163,6 +236,585 @@ class RetrievedChunk:
     matched_terms: list[str] | None = None
     matched_excerpt: str = ""
     selection_reasons: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class RetrievalStage:
+    """One deterministic retrieval stage in a native plan."""
+
+    name: str
+    query: str
+    limit: int
+    filters: Mapping[str, Any] = field(default_factory=dict)
+    priority: int = 0
+    terms: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.name not in RETRIEVAL_STAGE_NAMES:
+            raise ValueError(f"Unsupported retrieval stage: {self.name!r}")
+        if self.limit <= 0:
+            raise ValueError("retrieval stage limit must be greater than 0")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "query": self.query,
+            "limit": self.limit,
+            "filters": _json_safe_mapping(self.filters),
+            "priority": self.priority,
+            "terms": list(self.terms),
+        }
+
+
+@dataclass(frozen=True)
+class RetrievalPlan:
+    """Resolved query plus the independent stages used to retrieve candidates."""
+
+    original_question: str
+    resolved_question: str
+    requested_fact_type: str = "unknown"
+    subject: str = ""
+    intent: str = "unknown"
+    entities: tuple[str, ...] = ()
+    preferred_sources: tuple[str, ...] = ()
+    stages: tuple[RetrievalStage, ...] = ()
+    operational_lookup: bool = False
+    planning_reasons: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "original_question": self.original_question,
+            "resolved_question": self.resolved_question,
+            "requested_fact_type": self.requested_fact_type,
+            "subject": self.subject,
+            "intent": self.intent,
+            "entities": list(self.entities),
+            "preferred_sources": list(self.preferred_sources),
+            "operational_lookup": self.operational_lookup,
+            "planning_reasons": list(self.planning_reasons),
+            "stages": [stage.to_dict() for stage in self.stages],
+        }
+
+
+@dataclass(frozen=True)
+class RetrievalStageHit:
+    """One candidate hit from one stage, before cross-stage deduplication."""
+
+    stage: str
+    query: str
+    raw_score: float | None
+    rank: int
+    stage_weight: float
+    scored_value: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "stage": self.stage,
+            "query": self.query,
+            "raw_score": self.raw_score,
+            "rank": self.rank,
+            "stage_weight": self.stage_weight,
+            "scored_value": self.scored_value,
+        }
+
+
+@dataclass(frozen=True)
+class RetrievalObservation:
+    """One chunk and its provenance before aggregation."""
+
+    chunk: RetrievedChunk
+    stage_hit: RetrievalStageHit
+    match_reasons: tuple[str, ...] = ()
+    metadata_matches: tuple[str, ...] = ()
+    retrieval_adjustments: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RetrievalCandidate:
+    """One deduplicated candidate with complete cross-stage provenance."""
+
+    chunk: RetrievedChunk
+    final_score: float
+    best_raw_score: float | None
+    stage_hits: tuple[RetrievalStageHit, ...]
+    matched_queries: tuple[str, ...]
+    match_reasons: tuple[str, ...]
+    metadata_matches: tuple[str, ...]
+    retrieval_adjustments: tuple[str, ...]
+    stable_key: str
+
+    def to_chunk(self) -> RetrievedChunk:
+        return replace(
+            self.chunk,
+            final_score=self.final_score,
+            selection_reasons=list(
+                dict.fromkeys(
+                    [
+                        *(self.chunk.selection_reasons or []),
+                        *self.match_reasons,
+                        *self.retrieval_adjustments,
+                    ]
+                )
+            ),
+        )
+
+    def to_dict(self, *, rank: int | None = None) -> dict[str, Any]:
+        metadata = self.chunk.metadata or {}
+        return {
+            "chunk_id": self.chunk.chunk_id,
+            "record_key": metadata.get("record_key"),
+            "title": self.chunk.title,
+            "source": self.chunk.source,
+            "section": self.chunk.section,
+            "page": self.chunk.page,
+            "doc_type": self.chunk.doc_type or metadata.get("doc_type"),
+            "knowledge_domain": metadata.get("knowledge_domain"),
+            "logical_unit_type": metadata.get("logical_unit_type"),
+            "logical_unit_title": metadata.get("logical_unit_title"),
+            "score": self.final_score,
+            "final_score": self.final_score,
+            "best_raw_score": self.best_raw_score,
+            "retrieval_rank": rank,
+            "candidate_order": rank,
+            "stable_key": self.stable_key,
+            "stage_hits": [hit.to_dict() for hit in self.stage_hits],
+            "matched_queries": list(self.matched_queries),
+            "match_reasons": list(self.match_reasons),
+            "metadata_matches": list(self.metadata_matches),
+            "retrieval_adjustments": list(self.retrieval_adjustments),
+            "metadata": dict(metadata),
+        }
+
+
+@dataclass(frozen=True)
+class CandidateAggregation:
+    """Candidate aggregation result before serialization."""
+
+    candidates: tuple[RetrievalCandidate, ...]
+    candidate_count_before_dedupe: int
+    candidate_count_after_dedupe: int
+    duplicate_count: int
+    best_score_dedupe_correct: int
+    best_score_dedupe_checks: int
+
+
+@dataclass(frozen=True)
+class RetrievalResult:
+    """Native retrieval result consumed by orchestration and diagnostics."""
+
+    plan: RetrievalPlan
+    candidates: tuple[RetrievalCandidate, ...]
+    stage_hit_counts: Mapping[str, int]
+    candidate_count_before_dedupe: int
+    candidate_count_after_dedupe: int
+    duplicate_count: int
+    best_score_dedupe_correct: int
+    best_score_dedupe_checks: int
+    duration_ms: float
+
+    @property
+    def chunks(self) -> list[RetrievedChunk]:
+        return [candidate.to_chunk() for candidate in self.candidates]
+
+    def to_dict(self) -> dict[str, Any]:
+        serialized = [
+            candidate.to_dict(rank=index)
+            for index, candidate in enumerate(self.candidates, start=1)
+        ]
+        stage_queries: dict[str, list[str]] = {}
+        stage_filters: dict[str, list[dict[str, Any]]] = {}
+        for stage in self.plan.stages:
+            stage_queries.setdefault(stage.name, []).append(stage.query)
+            stage_filters.setdefault(stage.name, []).append(
+                _json_safe_mapping(stage.filters)
+            )
+        for candidate in self.candidates:
+            for hit in candidate.stage_hits:
+                queries = stage_queries.setdefault(hit.stage, [])
+                if hit.query not in queries:
+                    queries.append(hit.query)
+        return {
+            "retrieval_plan": self.plan.to_dict(),
+            "retrieval_stages": [stage.name for stage in self.plan.stages],
+            "stage_queries": stage_queries,
+            "stage_filters": stage_filters,
+            "stage_hit_counts": dict(self.stage_hit_counts),
+            "candidate_count_before_dedupe": self.candidate_count_before_dedupe,
+            "candidate_count_after_dedupe": self.candidate_count_after_dedupe,
+            "duplicate_count": self.duplicate_count,
+            "candidate_provenance": serialized,
+            "candidate_stage_hits": [
+                {
+                    "stable_key": candidate.stable_key,
+                    "stage_hits": [hit.to_dict() for hit in candidate.stage_hits],
+                }
+                for candidate in self.candidates
+            ],
+            "candidate_matched_queries": [
+                {
+                    "stable_key": candidate.stable_key,
+                    "matched_queries": list(candidate.matched_queries),
+                }
+                for candidate in self.candidates
+            ],
+            "candidate_best_raw_score": [
+                {
+                    "stable_key": candidate.stable_key,
+                    "best_raw_score": candidate.best_raw_score,
+                }
+                for candidate in self.candidates
+            ],
+            "candidate_final_score": [
+                {
+                    "stable_key": candidate.stable_key,
+                    "final_score": candidate.final_score,
+                }
+                for candidate in self.candidates
+            ],
+            "candidate_order": [candidate.stable_key for candidate in self.candidates],
+            "best_score_dedupe_correct": self.best_score_dedupe_correct,
+            "best_score_dedupe_checks": self.best_score_dedupe_checks,
+            "duration_ms": self.duration_ms,
+        }
+
+
+class RetrievalPlanner:
+    """Choose independent retrieval stages from the resolved QueryPlan."""
+
+    def build(
+        self,
+        *,
+        original_question: str,
+        resolved_question: str,
+        query_plan: Any = None,
+        retrieval_limit: int = 5,
+        candidate_limit: int = 30,
+    ) -> RetrievalPlan:
+        requested_fact_type = str(
+            getattr(query_plan, "requested_fact_type", "unknown") or "unknown"
+        )
+        subject = str(getattr(query_plan, "subject", "") or "").strip()
+        intent = str(getattr(query_plan, "intent", "unknown") or "unknown")
+        normalized_question = str(
+            getattr(query_plan, "normalized_question", "") or ""
+        ).strip()
+        expansions = tuple(
+            value.strip()
+            for value in getattr(query_plan, "query_expansions", ()) or ()
+            if isinstance(value, str) and value.strip()
+        )
+        preferred_sources = tuple(
+            value.strip()
+            for value in getattr(query_plan, "preferred_sources", ()) or ()
+            if isinstance(value, str) and value.strip()
+        )
+        operational_lookup = bool(
+            getattr(query_plan, "operational_lookup", False)
+        )
+        clarification_action = str(
+            getattr(query_plan, "clarification_action", "") or ""
+        )
+        entities = extract_exact_entities(
+            " ".join(value for value in (resolved_question, subject) if value)
+        )
+        reasons: list[str] = []
+
+        if clarification_action == "clarify":
+            return RetrievalPlan(
+                original_question=original_question,
+                resolved_question=resolved_question,
+                requested_fact_type=requested_fact_type,
+                subject=subject,
+                intent=intent,
+                entities=entities,
+                preferred_sources=preferred_sources,
+                operational_lookup=False,
+                planning_reasons=("clarification_required_before_retrieval",),
+            )
+
+        if operational_lookup:
+            return RetrievalPlan(
+                original_question=original_question,
+                resolved_question=resolved_question,
+                requested_fact_type=requested_fact_type,
+                subject=subject,
+                intent=intent,
+                entities=entities,
+                preferred_sources=preferred_sources,
+                operational_lookup=True,
+                planning_reasons=("operational_lookup_skips_semantic_retrieval",),
+            )
+
+        stage_limit = min(
+            max(candidate_limit, 1),
+            max(retrieval_limit, 10),
+        )
+        expansion_limit = min(max(candidate_limit, 1), max(retrieval_limit, 5))
+        stages: list[RetrievalStage] = []
+
+        for entity in entities:
+            name = (
+                "exact_identifier"
+                if _is_structured_identifier(entity)
+                else "exact_entity"
+            )
+            filters: dict[str, Any] = {"match_mode": "all"}
+            if _UNIT_IDENTIFIER_RE.search(entity):
+                filters["doc_types"] = list(ORGANIZATION_RETRIEVAL_DOC_TYPES)
+            _append_stage(
+                stages,
+                RetrievalStage(
+                    name=name,
+                    query=entity,
+                    terms=tuple(_TOKEN_RE.findall(entity)),
+                    limit=stage_limit,
+                    filters=filters,
+                    priority=10,
+                ),
+            )
+        if entities:
+            reasons.append("exact_entities_detected")
+
+        if subject:
+            _append_stage(
+                stages,
+                RetrievalStage(
+                    name="exact_subject",
+                    query=subject,
+                    terms=tuple(_prefix_query_terms(subject)),
+                    limit=stage_limit,
+                    filters={"match_mode": "prefix_any"},
+                    priority=20,
+                ),
+            )
+            reasons.append("subject_preserved")
+
+        _append_stage(
+            stages,
+            RetrievalStage(
+                name="fts_resolved_question",
+                query=resolved_question,
+                limit=stage_limit,
+                filters={"match_mode": "legacy"},
+                priority=30,
+            ),
+        )
+
+        if (
+            normalized_question
+            and _fold(normalized_question) != _fold(resolved_question)
+        ):
+            _append_stage(
+                stages,
+                RetrievalStage(
+                    name="fts_normalized_question",
+                    query=normalized_question,
+                    limit=stage_limit,
+                    filters={"match_mode": "legacy"},
+                    priority=40,
+                ),
+            )
+
+        for expansion in expansions:
+            _append_stage(
+                stages,
+                RetrievalStage(
+                    name="fts_query_expansion",
+                    query=expansion,
+                    limit=expansion_limit,
+                    filters={"match_mode": "legacy"},
+                    priority=50,
+                ),
+            )
+
+        if requested_fact_type == "procedure":
+            procedure_query = " ".join(
+                value
+                for value in (subject, "заявка инструкция порядок согласование")
+                if value
+            )
+            _append_stage(
+                stages,
+                RetrievalStage(
+                    name="procedure_lookup",
+                    query=procedure_query,
+                    terms=tuple(_prefix_query_terms(procedure_query)),
+                    limit=stage_limit,
+                    filters={
+                        "match_mode": "prefix_any",
+                        "metadata_filters": {
+                            "logical_unit_type": "procedure",
+                        },
+                    },
+                    priority=15,
+                ),
+            )
+            reasons.append("procedure_fact_type")
+
+        if requested_fact_type in ORGANIZATION_FUNCTION_FACT_TYPES and subject:
+            _append_stage(
+                stages,
+                RetrievalStage(
+                    name="organization_function_lookup",
+                    query=subject,
+                    terms=tuple(_prefix_query_terms(subject)),
+                    limit=stage_limit,
+                    filters={
+                        "match_mode": "prefix_any",
+                        "doc_types": list(ORGANIZATION_RETRIEVAL_DOC_TYPES),
+                    },
+                    priority=15,
+                ),
+            )
+            reasons.append("organization_function_fact_type")
+
+        for source in preferred_sources:
+            _append_stage(
+                stages,
+                RetrievalStage(
+                    name="preferred_source_lookup",
+                    query=source,
+                    terms=tuple(_TOKEN_RE.findall(source)),
+                    limit=stage_limit,
+                    filters={"match_mode": "all"},
+                    priority=25,
+                ),
+            )
+        if preferred_sources:
+            reasons.append("preferred_sources_are_additional")
+
+        _append_stage(
+            stages,
+            RetrievalStage(
+                name="sibling_lookup",
+                query="candidate metadata",
+                limit=candidate_limit,
+                filters={"dynamic": True},
+                priority=90,
+            ),
+        )
+
+        return RetrievalPlan(
+            original_question=original_question,
+            resolved_question=resolved_question,
+            requested_fact_type=requested_fact_type,
+            subject=subject,
+            intent=intent,
+            entities=entities,
+            preferred_sources=preferred_sources,
+            stages=tuple(sorted(stages, key=lambda stage: stage.priority)),
+            operational_lookup=False,
+            planning_reasons=tuple(reasons),
+        )
+
+
+class CandidateAggregator:
+    """Merge hits by stable identity while retaining every stage provenance."""
+
+    def aggregate(
+        self,
+        observations: Sequence[RetrievalObservation],
+        *,
+        candidate_limit: int | None = None,
+    ) -> CandidateAggregation:
+        grouped: dict[str, list[RetrievalObservation]] = {}
+        for observation in observations:
+            grouped.setdefault(
+                _stable_chunk_key(observation.chunk),
+                [],
+            ).append(observation)
+
+        candidates: list[RetrievalCandidate] = []
+        best_score_checks = 0
+        best_score_correct = 0
+        for stable_key, hits in grouped.items():
+            best = max(
+                hits,
+                key=lambda item: (
+                    item.stage_hit.scored_value,
+                    -item.stage_hit.rank,
+                    item.stage_hit.stage,
+                    item.stage_hit.query,
+                ),
+            )
+            if len(hits) > 1:
+                best_score_checks += 1
+            final_score = max(hit.stage_hit.scored_value for hit in hits)
+            if final_score == best.stage_hit.scored_value and len(hits) > 1:
+                best_score_correct += 1
+            raw_scores = [
+                hit.stage_hit.raw_score
+                for hit in hits
+                if hit.stage_hit.raw_score is not None
+            ]
+            stage_hits = tuple(
+                sorted(
+                    (hit.stage_hit for hit in hits),
+                    key=lambda value: (
+                        -value.scored_value,
+                        value.rank,
+                        value.stage,
+                        value.query,
+                    ),
+                )
+            )
+            candidates.append(
+                RetrievalCandidate(
+                    chunk=best.chunk,
+                    final_score=final_score,
+                    best_raw_score=min(raw_scores) if raw_scores else None,
+                    stage_hits=stage_hits,
+                    matched_queries=tuple(
+                        dict.fromkeys(hit.stage_hit.query for hit in hits)
+                    ),
+                    match_reasons=tuple(
+                        dict.fromkeys(
+                            reason
+                            for hit in hits
+                            for reason in hit.match_reasons
+                        )
+                    ),
+                    metadata_matches=tuple(
+                        dict.fromkeys(
+                            match
+                            for hit in hits
+                            for match in hit.metadata_matches
+                        )
+                    ),
+                    retrieval_adjustments=tuple(
+                        dict.fromkeys(
+                            adjustment
+                            for hit in hits
+                            for adjustment in hit.retrieval_adjustments
+                        )
+                    ),
+                    stable_key=stable_key,
+                )
+            )
+
+        candidates.sort(
+            key=lambda candidate: (
+                -candidate.final_score,
+                (
+                    candidate.best_raw_score
+                    if candidate.best_raw_score is not None
+                    else float("inf")
+                ),
+                candidate.stable_key,
+            )
+        )
+        total_unique = len(candidates)
+        if candidate_limit is not None:
+            candidates = candidates[: max(0, candidate_limit)]
+        before = len(observations)
+        return CandidateAggregation(
+            candidates=tuple(candidates),
+            candidate_count_before_dedupe=before,
+            candidate_count_after_dedupe=total_unique,
+            duplicate_count=max(0, before - total_unique),
+            best_score_dedupe_correct=best_score_correct,
+            best_score_dedupe_checks=best_score_checks,
+        )
 
 
 class SemanticRetriever:
@@ -205,6 +857,181 @@ class SemanticRetriever:
             key=lambda chunk: chunk.final_score if chunk.final_score is not None else 0.0,
             reverse=True,
         )[:limit]
+
+    def retrieve_plan(
+        self,
+        plan: RetrievalPlan,
+        *,
+        namespace: str = "semantic",
+        candidate_limit: int = 30,
+    ) -> RetrievalResult:
+        """Execute independent stages and aggregate candidates with provenance."""
+        started_at = time.monotonic()
+        observations: list[RetrievalObservation] = []
+        stage_hit_counts: dict[str, int] = {}
+
+        for stage in plan.stages:
+            if stage.name == "sibling_lookup":
+                continue
+            stage_observations = self._execute_stage(
+                plan,
+                stage,
+                namespace=namespace,
+                candidate_limit=candidate_limit,
+            )
+            observations.extend(stage_observations)
+            stage_hit_counts[stage.name] = (
+                stage_hit_counts.get(stage.name, 0) + len(stage_observations)
+            )
+
+        preliminary = CandidateAggregator().aggregate(
+            observations,
+            candidate_limit=candidate_limit,
+        )
+        sibling_observations = self._collect_sibling_observations(
+            plan,
+            preliminary.candidates,
+            namespace=namespace,
+            candidate_limit=candidate_limit,
+        )
+        observations.extend(sibling_observations)
+        if any(stage.name == "sibling_lookup" for stage in plan.stages):
+            stage_hit_counts["sibling_lookup"] = len(sibling_observations)
+
+        aggregation = CandidateAggregator().aggregate(
+            observations,
+            candidate_limit=candidate_limit,
+        )
+        return RetrievalResult(
+            plan=plan,
+            candidates=aggregation.candidates,
+            stage_hit_counts=stage_hit_counts,
+            candidate_count_before_dedupe=(
+                aggregation.candidate_count_before_dedupe
+            ),
+            candidate_count_after_dedupe=(
+                aggregation.candidate_count_after_dedupe
+            ),
+            duplicate_count=aggregation.duplicate_count,
+            best_score_dedupe_correct=aggregation.best_score_dedupe_correct,
+            best_score_dedupe_checks=aggregation.best_score_dedupe_checks,
+            duration_ms=round((time.monotonic() - started_at) * 1000, 3),
+        )
+
+    def _execute_stage(
+        self,
+        plan: RetrievalPlan,
+        stage: RetrievalStage,
+        *,
+        namespace: str,
+        candidate_limit: int,
+    ) -> list[RetrievalObservation]:
+        match_mode = str(stage.filters.get("match_mode") or "legacy")
+        if match_mode == "legacy":
+            chunks = self.retrieve(
+                stage.query,
+                limit=min(stage.limit, candidate_limit),
+                namespace=namespace,
+                candidate_limit=candidate_limit,
+            )
+        else:
+            rows = self.store.search_fts_terms(
+                stage.terms or tuple(_TOKEN_RE.findall(stage.query)),
+                match_mode=match_mode,
+                namespace=namespace,
+                limit=min(stage.limit, candidate_limit),
+                doc_types=_string_sequence(stage.filters.get("doc_types")),
+                metadata_filters=_mapping_or_none(
+                    stage.filters.get("metadata_filters")
+                ),
+            )
+            chunks = [
+                _rerank_chunk(_row_to_chunk(row), question=plan.resolved_question)
+                for row in rows
+            ]
+
+        metadata_matches = _stage_metadata_matches(stage)
+        return [
+            _observation(
+                chunk,
+                stage=stage.name,
+                query=stage.query,
+                rank=rank,
+                metadata_matches=metadata_matches,
+            )
+            for rank, chunk in enumerate(chunks, start=1)
+        ]
+
+    def _collect_sibling_observations(
+        self,
+        plan: RetrievalPlan,
+        candidates: Sequence[RetrievalCandidate],
+        *,
+        namespace: str,
+        candidate_limit: int,
+    ) -> list[RetrievalObservation]:
+        if not any(stage.name == "sibling_lookup" for stage in plan.stages):
+            return []
+
+        observations: list[RetrievalObservation] = []
+        seen_lookups: set[tuple[str, str, str]] = set()
+        for candidate in candidates:
+            chunk = candidate.chunk
+            metadata = chunk.metadata or {}
+            logical_type = str(metadata.get("logical_unit_type") or "")
+            source = chunk.source
+            logical_title = str(metadata.get("logical_unit_title") or "")
+
+            metadata_filters: dict[str, Any]
+            if logical_type == "policy_rule":
+                metadata_filters = {"logical_unit_type": "policy_rule"}
+                lookup_title = ""
+            elif logical_type == "procedure" and logical_title:
+                metadata_filters = {
+                    "logical_unit_type": "procedure",
+                    "logical_unit_title": logical_title,
+                }
+                lookup_title = logical_title
+            else:
+                continue
+
+            lookup_key = (source, logical_type, lookup_title)
+            if lookup_key in seen_lookups:
+                continue
+            seen_lookups.add(lookup_key)
+            rows = self.store.search_chunks_by_metadata(
+                namespace=namespace,
+                source=source,
+                metadata_filters=metadata_filters,
+                limit=candidate_limit,
+            )
+            query = " | ".join(
+                value
+                for value in (
+                    str(metadata.get("source_file") or source),
+                    logical_type,
+                    logical_title,
+                )
+                if value
+            )
+            for rank, row in enumerate(rows, start=1):
+                chunk_result = _rerank_chunk(
+                    _row_to_chunk(row),
+                    question=plan.resolved_question,
+                )
+                observations.append(
+                    _observation(
+                        chunk_result,
+                        stage="sibling_lookup",
+                        query=query,
+                        rank=rank,
+                        metadata_matches=tuple(
+                            f"{key}={value}"
+                            for key, value in metadata_filters.items()
+                        ),
+                    )
+                )
+        return observations
 
     def _collect_candidate_rows(
         self,
@@ -671,6 +1498,200 @@ def _score_chunk(
         reasons.append("matched query terms in searchable fields")
 
     return score, reasons
+
+
+def extract_exact_entities(value: str) -> tuple[str, ...]:
+    """Extract high-confidence identifiers/entities without an LLM."""
+    entities: list[str] = []
+    seen: set[str] = set()
+    for pattern in (
+        _POLICY_CODE_RE,
+        _UNIT_IDENTIFIER_RE,
+        _FORM_IDENTIFIER_RE,
+        _LATIN_BRAND_RE,
+    ):
+        for match in pattern.finditer(value):
+            entity = match.group(0)
+            if pattern is _UNIT_IDENTIFIER_RE:
+                label = match.group("label").casefold()
+                canonical_label = (
+                    "отделение"
+                    if label == "отделение"
+                    else ("служба" if label == "служба" else "отдел")
+                )
+                entity = f"{canonical_label} {match.group('number').upper()}"
+            _append_entity(entities, seen, entity)
+
+    for match in _PERSON_TOKEN_RE.finditer(value):
+        token = match.group(0)
+        if token in _ENTITY_STOP_WORDS:
+            continue
+        if match.start() == 0 and token.casefold() in {
+            word.casefold() for word in _ENTITY_STOP_WORDS
+        }:
+            continue
+        _append_entity(entities, seen, token)
+
+    return tuple(entities)
+
+
+def _append_entity(values: list[str], seen: set[str], value: str) -> None:
+    clean = normalize_question(value)
+    key = clean.casefold()
+    if not clean or key in seen:
+        return
+    values.append(clean)
+    seen.add(key)
+
+
+def _is_structured_identifier(value: str) -> bool:
+    return bool(
+        _POLICY_CODE_RE.search(value)
+        or re.fullmatch(r"[А-ЯЁA-Z]{1,4}\s+\d{3,8}", value, re.IGNORECASE)
+        or _UNIT_IDENTIFIER_RE.search(value)
+        or _FORM_IDENTIFIER_RE.search(value)
+    )
+
+
+def _prefix_query_terms(value: str) -> list[str]:
+    terms = extract_query_terms(value, include_expansions=False)
+    prefixes: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        for token in _TOKEN_RE.findall(term):
+            folded = token.casefold()
+            prefix = _stem_prefix(folded)
+            if len(prefix) < 3 or prefix in seen:
+                continue
+            seen.add(prefix)
+            prefixes.append(prefix)
+    return prefixes
+
+
+def _append_stage(
+    stages: list[RetrievalStage],
+    stage: RetrievalStage,
+) -> None:
+    key = (stage.name, _fold(normalize_question(stage.query)))
+    if any(
+        (existing.name, _fold(normalize_question(existing.query))) == key
+        for existing in stages
+    ):
+        return
+    stages.append(stage)
+
+
+def _observation(
+    chunk: RetrievedChunk,
+    *,
+    stage: str,
+    query: str,
+    rank: int,
+    metadata_matches: Sequence[str] = (),
+) -> RetrievalObservation:
+    stage_weight = STAGE_SCORE_WEIGHTS[stage]
+    raw_component = min(
+        _base_score(chunk.score),
+        _MAX_FTS_SCORE_COMPONENT,
+    )
+    rerank_component = min(
+        max(float(chunk.rerank_score or 0.0), 0.0),
+        _MAX_RERANK_SCORE_COMPONENT,
+    )
+    metadata_bonus = _METADATA_MATCH_BONUS if metadata_matches else 0.0
+    scored_value = round(
+        stage_weight + raw_component + rerank_component + metadata_bonus,
+        6,
+    )
+    adjustments = [
+        f"stage_weight:{stage}={stage_weight:g}",
+        f"fts_component={raw_component:.3f}",
+        f"rerank_component={rerank_component:.3f}",
+    ]
+    if metadata_bonus:
+        adjustments.append(f"metadata_match_bonus={metadata_bonus:g}")
+    return RetrievalObservation(
+        chunk=chunk,
+        stage_hit=RetrievalStageHit(
+            stage=stage,
+            query=query,
+            raw_score=chunk.score,
+            rank=rank,
+            stage_weight=stage_weight,
+            scored_value=scored_value,
+        ),
+        match_reasons=tuple(
+            dict.fromkeys(
+                [
+                    f"retrieval stage {stage}",
+                    *(chunk.selection_reasons or []),
+                ]
+            )
+        ),
+        metadata_matches=tuple(metadata_matches),
+        retrieval_adjustments=tuple(adjustments),
+    )
+
+
+def _stage_metadata_matches(stage: RetrievalStage) -> tuple[str, ...]:
+    matches: list[str] = []
+    for doc_type in _string_sequence(stage.filters.get("doc_types")):
+        matches.append(f"doc_type={doc_type}")
+    metadata_filters = _mapping_or_none(stage.filters.get("metadata_filters"))
+    for key, value in (metadata_filters or {}).items():
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            matches.extend(f"{key}={item}" for item in value)
+        else:
+            matches.append(f"{key}={value}")
+    return tuple(matches)
+
+
+def _stable_chunk_key(chunk: RetrievedChunk) -> str:
+    metadata = chunk.metadata or {}
+    for name in ("record_key", "content_hash"):
+        value = str(metadata.get(name) or "").strip()
+        if value:
+            return f"{name}:{_fold(value)}"
+    if chunk.chunk_id is not None:
+        return f"chunk_id:{chunk.chunk_id}"
+    fallback = "|".join(
+        _fold(str(value or ""))
+        for value in (
+            chunk.source,
+            chunk.title,
+            chunk.section,
+            chunk.page,
+        )
+    )
+    return f"source_fingerprint:{fallback}"
+
+
+def _string_sequence(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return (value,) if value.strip() else ()
+    if not isinstance(value, Sequence):
+        return ()
+    return tuple(
+        str(item).strip()
+        for item in value
+        if str(item).strip()
+    )
+
+
+def _mapping_or_none(value: Any) -> Mapping[str, Any] | None:
+    return value if isinstance(value, Mapping) else None
+
+
+def _json_safe_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, item in value.items():
+        if isinstance(item, Mapping):
+            result[str(key)] = _json_safe_mapping(item)
+        elif isinstance(item, Sequence) and not isinstance(item, (str, bytes)):
+            result[str(key)] = list(item)
+        else:
+            result[str(key)] = item
+    return result
 
 
 def _row_to_chunk(row: dict[str, Any]) -> RetrievedChunk:

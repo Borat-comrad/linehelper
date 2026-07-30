@@ -325,6 +325,15 @@ def _print_chat_result(result: RagAnswer, *, debug: bool) -> None:
         print(f"expansions: {_join(query_plan.get('query_expansions'))}")
         print(f"preferred sources: {_join(query_plan.get('preferred_sources'))}")
         print(f"fallback: {query_plan.get('fallback_used', False)}")
+        retrieval = result.retrieval or {}
+        print(f"retrieval stages: {_join(retrieval.get('retrieval_stages'))}")
+        print(
+            "retrieval candidates before/after dedupe: "
+            f"{retrieval.get('candidate_count_before_dedupe', '-')}/"
+            f"{retrieval.get('candidate_count_after_dedupe', '-')}"
+        )
+        print(f"retrieval duplicates: {retrieval.get('duplicate_count', '-')}")
+        print(f"retrieval duration ms: {retrieval.get('duration_ms', '-')}")
         print(f"found chunks: {result.chunks_used}")
         print(f"diagnostic chunks: {len(result.diagnostic_candidates)}")
         print(f"elapsed seconds: {result.elapsed_seconds}")

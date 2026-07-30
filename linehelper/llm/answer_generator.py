@@ -21,7 +21,11 @@ from linehelper.rag.conversation_resolver import (
     conversation_diagnostics,
     pending_clarification_from_plan,
 )
-from linehelper.rag.retriever import RetrievedChunk, SemanticRetriever
+from linehelper.rag.retriever import (
+    RetrievedChunk,
+    RetrievalPlanner,
+    SemanticRetriever,
+)
 
 if TYPE_CHECKING:
     from linehelper.rag.query_analyzer import QueryPlan
@@ -283,6 +287,7 @@ class RagAnswer:
     query_plan: dict[str, Any] | None = None
     resolved_question: str | None = None
     conversation: dict[str, Any] | None = None
+    retrieval: dict[str, Any] | None = None
 
 
 def rag_answer_history_metadata(result: RagAnswer) -> dict[str, Any]:
@@ -298,6 +303,13 @@ def rag_answer_history_metadata(result: RagAnswer) -> dict[str, Any]:
 class QueryAnalysisResult:
     plan: QueryPlan | None
     diagnostics: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RetrievalExecution:
+    chunks: list[RetrievedChunk]
+    diagnostics: dict[str, Any] | None = None
+    native: bool = False
 
 
 class RagAnswerError(RuntimeError):
@@ -422,17 +434,21 @@ class RagAnswerGenerator:
             pending_after=None,
         )
         intent = _runtime_query_intent(resolved_question, query_plan)
-        chunks = self._retrieve_with_query_plan(
+        retrieval_execution = self._retrieve_with_query_plan(
             resolved_question,
+            original_question=clean_question,
             query_plan=query_plan,
             retrieval_limit=retrieval_limit,
             candidate_limit=candidate_limit,
         )
-        chunks = _boost_organization_chunks(
-            chunks,
-            resolved_question,
-            intent=intent,
-        )
+        chunks = retrieval_execution.chunks
+        retrieval_diagnostics = retrieval_execution.diagnostics
+        if not retrieval_execution.native:
+            chunks = _boost_organization_chunks(
+                chunks,
+                resolved_question,
+                intent=intent,
+            )
         if intent.name == "kp_commercial_offer":
             return RagAnswer(
                 question=clean_question,
@@ -455,6 +471,7 @@ class RagAnswerGenerator:
                 query_plan=query_plan_diagnostics,
                 resolved_question=resolved_question,
                 conversation=conversation_result,
+                retrieval=retrieval_diagnostics,
             )
         if intent.name == "comparison":
             chunks = sorted(
@@ -511,6 +528,7 @@ class RagAnswerGenerator:
                 query_plan=query_plan_diagnostics,
                 resolved_question=resolved_question,
                 conversation=conversation_result,
+                retrieval=retrieval_diagnostics,
             )
 
         prompt = build_rag_prompt(resolved_question, context_chunks)
@@ -544,6 +562,7 @@ class RagAnswerGenerator:
             query_plan=query_plan_diagnostics,
             resolved_question=resolved_question,
             conversation=conversation_result,
+            retrieval=retrieval_diagnostics,
         )
 
     def _retrieve_comparison_candidates(
@@ -603,15 +622,40 @@ class RagAnswerGenerator:
         self,
         question: str,
         *,
+        original_question: str,
         query_plan: QueryPlan | None,
         retrieval_limit: int,
         candidate_limit: int,
-    ) -> list[RetrievedChunk]:
-        if query_plan is None:
-            return self.retriever.retrieve(
-                question,
-                limit=retrieval_limit,
+    ) -> RetrievalExecution:
+        retrieval_plan = RetrievalPlanner().build(
+            original_question=original_question,
+            resolved_question=question,
+            query_plan=query_plan,
+            retrieval_limit=retrieval_limit,
+            candidate_limit=candidate_limit,
+        )
+        retrieve_plan = getattr(self.retriever, "retrieve_plan", None)
+        supports_retrieval_plan = bool(
+            getattr(self.retriever, "supports_retrieval_plan", True)
+        )
+        if callable(retrieve_plan) and supports_retrieval_plan:
+            result = retrieve_plan(
+                retrieval_plan,
                 candidate_limit=candidate_limit,
+            )
+            return RetrievalExecution(
+                chunks=result.chunks,
+                diagnostics=result.to_dict(),
+                native=True,
+            )
+
+        if query_plan is None:
+            return RetrievalExecution(
+                chunks=self.retriever.retrieve(
+                    question,
+                    limit=retrieval_limit,
+                    candidate_limit=candidate_limit,
+                ),
             )
 
         chunks: list[RetrievedChunk] = []
@@ -624,13 +668,15 @@ class RagAnswerGenerator:
                 )
             )
 
-        return sorted(
-            _boost_preferred_source_chunks(
-                _dedupe_chunks(chunks),
-                query_plan.preferred_sources,
+        return RetrievalExecution(
+            chunks=sorted(
+                _boost_preferred_source_chunks(
+                    _dedupe_chunks(chunks),
+                    query_plan.preferred_sources,
+                ),
+                key=_chunk_score,
+                reverse=True,
             ),
-            key=_chunk_score,
-            reverse=True,
         )
 
 def _query_plan_diagnostics(query_plan: QueryPlan) -> dict[str, Any]:
@@ -750,10 +796,16 @@ def _pending_clarification_diagnostics(
 def _query_plan_is_usable(query_plan: QueryPlan) -> bool:
     if query_plan.clarification_action == "clarify":
         return True
-    if query_plan.intent == "unknown":
+    if (
+        query_plan.intent == "unknown"
+        and query_plan.requested_fact_type == "unknown"
+        and not query_plan.subject.strip()
+    ):
         return False
     return bool(
-        query_plan.normalized_question.strip()
+        query_plan.requested_fact_type != "unknown"
+        or query_plan.subject.strip()
+        or query_plan.normalized_question.strip()
         or query_plan.query_expansions
         or query_plan.preferred_sources
     )

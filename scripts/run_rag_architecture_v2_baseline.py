@@ -56,10 +56,6 @@ DEFAULT_OUTPUT_DIR = Path("data/test_runs/rag_architecture_v2")
 DEFAULT_RETRIEVAL_LIMIT = 5
 DEFAULT_CANDIDATE_LIMIT = 30
 OBSERVABILITY_GAPS = {
-    "merged_candidates": (
-        "RagAnswer exposes selected sources and excluded diagnostic candidates, "
-        "but not the post-merge candidate sequence"
-    ),
     "evidence_decision": (
         "the evidence gate exposes only the resulting response_kind, not subclaim coverage "
         "or the gate decision"
@@ -291,7 +287,21 @@ def _run_full_case(
             turns.append(turn)
             break
 
-        raw_candidates = retriever.flattened_candidates()
+        retrieval = (
+            result.retrieval
+            if isinstance(result.retrieval, dict)
+            else unavailable("RagAnswer did not expose retrieval diagnostics")
+        )
+        native_candidates = (
+            retrieval.get("candidate_provenance")
+            if isinstance(retrieval, dict)
+            else None
+        )
+        raw_candidates = (
+            [dict(candidate) for candidate in native_candidates]
+            if isinstance(native_candidates, list)
+            else retriever.flattened_candidates()
+        )
         selected_context = selected_context_from_sources(
             result.sources,
             raw_candidates,
@@ -466,10 +476,77 @@ def _run_full_case(
             "intent": intent,
             "clarification": clarification,
             "operational_boundary": operational_boundary,
-            "retrieval_queries": [call["query"] for call in retriever.calls],
+            "retrieval_plan": _retrieval_value(retrieval, "retrieval_plan"),
+            "retrieval_stages": _retrieval_value(
+                retrieval,
+                "retrieval_stages",
+            ),
+            "stage_queries": _retrieval_value(retrieval, "stage_queries"),
+            "stage_filters": _retrieval_value(retrieval, "stage_filters"),
+            "stage_hit_counts": _retrieval_value(
+                retrieval,
+                "stage_hit_counts",
+            ),
+            "retrieval_queries": (
+                _flatten_stage_queries(retrieval)
+                if isinstance(retrieval, dict)
+                else [call["query"] for call in retriever.calls]
+            ),
             "raw_candidates": raw_candidates,
-            "merged_candidates": unavailable(
-                OBSERVABILITY_GAPS["merged_candidates"]
+            "merged_candidates": (
+                [dict(candidate) for candidate in native_candidates]
+                if isinstance(native_candidates, list)
+                else unavailable(
+                    "post-merge candidates are absent from retrieval diagnostics"
+                )
+            ),
+            "candidate_count_before_dedupe": _retrieval_value(
+                retrieval,
+                "candidate_count_before_dedupe",
+            ),
+            "candidate_count_after_dedupe": _retrieval_value(
+                retrieval,
+                "candidate_count_after_dedupe",
+            ),
+            "duplicate_count": _retrieval_value(
+                retrieval,
+                "duplicate_count",
+            ),
+            "candidate_provenance": _retrieval_value(
+                retrieval,
+                "candidate_provenance",
+            ),
+            "candidate_stage_hits": _retrieval_value(
+                retrieval,
+                "candidate_stage_hits",
+            ),
+            "candidate_matched_queries": _retrieval_value(
+                retrieval,
+                "candidate_matched_queries",
+            ),
+            "candidate_best_raw_score": _retrieval_value(
+                retrieval,
+                "candidate_best_raw_score",
+            ),
+            "candidate_final_score": _retrieval_value(
+                retrieval,
+                "candidate_final_score",
+            ),
+            "candidate_order": _retrieval_value(
+                retrieval,
+                "candidate_order",
+            ),
+            "best_score_dedupe_correct": _retrieval_value(
+                retrieval,
+                "best_score_dedupe_correct",
+            ),
+            "best_score_dedupe_checks": _retrieval_value(
+                retrieval,
+                "best_score_dedupe_checks",
+            ),
+            "retrieval_duration_ms": _retrieval_value(
+                retrieval,
+                "duration_ms",
             ),
             "selected_context": selected_context,
             "evidence_decision": unavailable(
@@ -612,10 +689,61 @@ def _run_retrieval_only_case(
                 "operational_boundary": unavailable(
                     "not executed in retrieval-only mode"
                 ),
+                "retrieval_plan": unavailable(
+                    "native plan not executed in retrieval-only mode"
+                ),
+                "retrieval_stages": unavailable(
+                    "native plan not executed in retrieval-only mode"
+                ),
+                "stage_queries": unavailable(
+                    "native plan not executed in retrieval-only mode"
+                ),
+                "stage_filters": unavailable(
+                    "native plan not executed in retrieval-only mode"
+                ),
+                "stage_hit_counts": unavailable(
+                    "native plan not executed in retrieval-only mode"
+                ),
                 "retrieval_queries": [call["query"] for call in retriever.calls],
                 "raw_candidates": retriever.flattened_candidates(),
                 "merged_candidates": unavailable(
                     "not executed in retrieval-only mode"
+                ),
+                "candidate_count_before_dedupe": unavailable(
+                    "native plan not executed in retrieval-only mode"
+                ),
+                "candidate_count_after_dedupe": unavailable(
+                    "native plan not executed in retrieval-only mode"
+                ),
+                "duplicate_count": unavailable(
+                    "native plan not executed in retrieval-only mode"
+                ),
+                "candidate_provenance": unavailable(
+                    "native plan not executed in retrieval-only mode"
+                ),
+                "candidate_stage_hits": unavailable(
+                    "native plan not executed in retrieval-only mode"
+                ),
+                "candidate_matched_queries": unavailable(
+                    "native plan not executed in retrieval-only mode"
+                ),
+                "candidate_best_raw_score": unavailable(
+                    "native plan not executed in retrieval-only mode"
+                ),
+                "candidate_final_score": unavailable(
+                    "native plan not executed in retrieval-only mode"
+                ),
+                "candidate_order": unavailable(
+                    "native plan not executed in retrieval-only mode"
+                ),
+                "best_score_dedupe_correct": unavailable(
+                    "native plan not executed in retrieval-only mode"
+                ),
+                "best_score_dedupe_checks": unavailable(
+                    "native plan not executed in retrieval-only mode"
+                ),
+                "retrieval_duration_ms": unavailable(
+                    "native plan not executed in retrieval-only mode"
                 ),
                 "selected_context": unavailable(
                     "not executed in retrieval-only mode"
@@ -703,9 +831,26 @@ def _empty_diagnostic(
         "intent": marker,
         "clarification": marker,
         "operational_boundary": marker,
+        "retrieval_plan": marker,
+        "retrieval_stages": marker,
+        "stage_queries": marker,
+        "stage_filters": marker,
+        "stage_hit_counts": marker,
         "retrieval_queries": marker,
         "raw_candidates": marker,
         "merged_candidates": marker,
+        "candidate_count_before_dedupe": marker,
+        "candidate_count_after_dedupe": marker,
+        "duplicate_count": marker,
+        "candidate_provenance": marker,
+        "candidate_stage_hits": marker,
+        "candidate_matched_queries": marker,
+        "candidate_best_raw_score": marker,
+        "candidate_final_score": marker,
+        "candidate_order": marker,
+        "best_score_dedupe_correct": marker,
+        "best_score_dedupe_checks": marker,
+        "retrieval_duration_ms": marker,
         "selected_context": marker,
         "evidence_decision": marker,
         "answer": marker,
@@ -875,6 +1020,32 @@ def _conversation_value(conversation: Any, key: str) -> Any:
     if isinstance(conversation, dict) and key in conversation:
         return conversation[key]
     return unavailable(f"{key} is absent from conversation diagnostics")
+
+
+def _retrieval_value(retrieval: Any, key: str) -> Any:
+    if isinstance(retrieval, dict) and key in retrieval:
+        return retrieval[key]
+    return unavailable(f"{key} is absent from retrieval diagnostics")
+
+
+def _flatten_stage_queries(retrieval: dict[str, Any]) -> list[str]:
+    stage_queries = retrieval.get("stage_queries")
+    if not isinstance(stage_queries, dict):
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for queries in stage_queries.values():
+        if not isinstance(queries, list):
+            continue
+        for query in queries:
+            if not isinstance(query, str) or not query.strip():
+                continue
+            key = query.casefold()
+            if key in seen:
+                continue
+            result.append(query)
+            seen.add(key)
+    return result
 
 
 def _configure_stdout() -> None:

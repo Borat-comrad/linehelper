@@ -80,6 +80,8 @@
           "record_keys": [],
           "chunk_ids": [71, 72, 73, 74]
         },
+        "required_retrieval_stages": ["sibling_lookup"],
+        "required_candidate_rank_max": 10,
         "forbidden_behaviors": ["single_rule_only", "generic_no_answer"]
       }
     },
@@ -107,6 +109,8 @@
           "record_keys": [],
           "chunk_ids": [29]
         },
+        "required_retrieval_stages": ["procedure_lookup"],
+        "required_candidate_rank_max": 10,
         "forbidden_behaviors": ["generic_no_answer", "organization_noise_as_procedure"]
       }
     },
@@ -266,14 +270,19 @@
         "final_modes": ["answer"],
         "required_retrieval": {
           "sources": ["bvr_company_structure_instruction_v2 (2).txt"],
-          "record_keys": [],
-          "chunk_ids": [437, 439]
+          "record_keys": [
+            "organization_unit:division_1:2025-12-17",
+            "organization_unit:department_2:2025-12-17"
+          ],
+          "chunk_ids": []
         },
         "required_context": {
           "sources": ["bvr_company_structure_instruction_v2 (2).txt"],
           "record_keys": [],
           "chunk_ids": [437, 439]
         },
+        "required_retrieval_stages": ["organization_function_lookup"],
+        "required_candidate_rank_max": 10,
         "forbidden_behaviors": ["substitute_hr_document_flow", "generic_no_answer"],
         "required_answer_concepts": [["Шкиренков"], ["Малахов"]],
         "forbidden_answer_terms": ["Прокошина"]
@@ -1360,6 +1369,210 @@
         "final_modes": ["answer", "partial_answer", "no_answer"],
         "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
         "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "forbidden_behaviors": []
+      }
+    },
+    {
+      "id": "MR01",
+      "group": "multi_stage_retrieval",
+      "tags": ["stage_4", "retrieval", "procedure", "neighbor"],
+      "messages": [
+        {"role": "user", "content": "Как заказать новый компьютер для рабочего места?"}
+      ],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "procedure",
+        "intent": ["equipment_it_request", "document_flow", "unknown"],
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {
+          "sources": ["2026-19-06 Инструкция Заявка в 1 отд-е (построение) хоз.часть"],
+          "record_keys": [],
+          "chunk_ids": [29]
+        },
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_retrieval_stages": ["procedure_lookup"],
+        "required_candidate_rank_max": 10,
+        "forbidden_behaviors": ["organization_noise_as_procedure"]
+      }
+    },
+    {
+      "id": "MR02",
+      "group": "multi_stage_retrieval",
+      "tags": ["stage_4", "retrieval", "responsibility", "organization", "neighbor"],
+      "messages": [
+        {"role": "user", "content": "Кто занимается внутренним перемещением документов?"}
+      ],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": ["responsible_person", "primary_contact"],
+        "intent": "roles_responsibility",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {
+          "sources": ["bvr_company_structure_instruction_v2 (2).txt"],
+          "record_keys": [
+            "organization_unit:division_1:2025-12-17",
+            "organization_unit:department_2:2025-12-17"
+          ],
+          "chunk_ids": []
+        },
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_retrieval_stages": ["organization_function_lookup"],
+        "required_candidate_rank_max": 10,
+        "forbidden_behaviors": []
+      }
+    },
+    {
+      "id": "MR03",
+      "group": "multi_stage_retrieval",
+      "tags": ["stage_4", "retrieval", "procedure", "exact_identifier"],
+      "messages": [
+        {"role": "user", "content": "Как создать СЗ_Командировка?"}
+      ],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "procedure",
+        "intent": ["business_trip", "document_flow", "unknown"],
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {
+          "sources": ["Инструкция Согласования командировки в Документообороте"],
+          "record_keys": [],
+          "chunk_ids": [47]
+        },
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_retrieval_stages": ["exact_identifier"],
+        "required_candidate_rank_max": 10,
+        "forbidden_behaviors": []
+      }
+    },
+    {
+      "id": "MR04",
+      "group": "multi_stage_retrieval",
+      "tags": ["stage_4", "retrieval", "responsibility", "organization", "exact_identifier"],
+      "messages": [
+        {"role": "user", "content": "Кто руководит отделом 12Б?"}
+      ],
+      "expected": {
+        "answerability": "full",
+        "requested_fact_type": ["unit_head", "responsible_person"],
+        "intent": "roles_responsibility",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer"],
+        "required_retrieval": {
+          "sources": ["bvr_company_structure_instruction_v2 (2).txt"],
+          "record_keys": ["organization_unit:department_12b:2025-12-17"],
+          "chunk_ids": []
+        },
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_retrieval_stages": ["exact_identifier", "organization_function_lookup"],
+        "required_candidate_rank_max": 10,
+        "forbidden_behaviors": []
+      }
+    },
+    {
+      "id": "MR05",
+      "group": "multi_stage_retrieval",
+      "tags": ["stage_4", "retrieval", "definition", "exact_identifier"],
+      "messages": [
+        {"role": "user", "content": "Что сказано в ИП-0005?"}
+      ],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": ["definition", "list", "unknown"],
+        "intent": ["order_disposition", "document_flow", "unknown"],
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {
+          "sources": ["ИП-0005 Распоряжения"],
+          "record_keys": [],
+          "chunk_ids": [67]
+        },
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_retrieval_stages": ["exact_identifier"],
+        "required_candidate_rank_max": 10,
+        "forbidden_behaviors": []
+      }
+    },
+    {
+      "id": "MR06",
+      "group": "multi_stage_retrieval",
+      "tags": ["stage_4", "retrieval", "procedure", "sibling"],
+      "messages": [
+        {"role": "user", "content": "Перечисли правила документооборота."}
+      ],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "list",
+        "intent": "document_flow",
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {
+          "sources": ["ИП-0006 Документооборот"],
+          "record_keys": [],
+          "chunk_ids": [],
+          "sections": [
+            "Кадровые документы",
+            "Официальная переписка",
+            "Внутреннее взаимодействие",
+            "Передача оригиналов документов"
+          ]
+        },
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_retrieval_stages": ["sibling_lookup"],
+        "required_candidate_rank_max": 10,
+        "forbidden_behaviors": []
+      }
+    },
+    {
+      "id": "MR07",
+      "group": "multi_stage_retrieval",
+      "tags": ["stage_4", "retrieval", "procedure", "paraphrase"],
+      "messages": [
+        {"role": "user", "content": "Как запросить себе новое рабочее оборудование?"}
+      ],
+      "expected": {
+        "answerability": "partial",
+        "requested_fact_type": "procedure",
+        "intent": ["equipment_it_request", "document_flow", "unknown"],
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["answer", "partial_answer", "no_answer"],
+        "required_retrieval": {
+          "sources": ["2026-19-06 Инструкция Заявка в 1 отд-е (построение) хоз.часть"],
+          "record_keys": [],
+          "chunk_ids": [29]
+        },
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_retrieval_stages": ["procedure_lookup"],
+        "required_candidate_rank_max": 10,
+        "forbidden_behaviors": ["organization_noise_as_procedure"]
+      }
+    },
+    {
+      "id": "MR08",
+      "group": "multi_stage_retrieval",
+      "tags": ["stage_4", "retrieval", "procedure", "negative"],
+      "messages": [
+        {"role": "user", "content": "Как оформить документ, которого нет в базе?"}
+      ],
+      "expected": {
+        "answerability": "none",
+        "requested_fact_type": "procedure",
+        "intent": ["document_flow", "unknown"],
+        "operational_lookup": false,
+        "clarification": false,
+        "final_modes": ["no_answer", "partial_answer"],
+        "required_retrieval": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_context": {"sources": [], "record_keys": [], "chunk_ids": []},
+        "required_retrieval_stages": ["procedure_lookup"],
         "forbidden_behaviors": []
       }
     }

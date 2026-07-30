@@ -59,6 +59,20 @@ RESOLUTION_KINDS = frozenset(
         "unresolved_follow_up",
     }
 )
+RETRIEVAL_STAGE_NAMES = frozenset(
+    {
+        "exact_identifier",
+        "exact_entity",
+        "exact_subject",
+        "fts_resolved_question",
+        "fts_normalized_question",
+        "fts_query_expansion",
+        "procedure_lookup",
+        "organization_function_lookup",
+        "preferred_source_lookup",
+        "sibling_lookup",
+    }
+)
 
 
 class FixtureValidationError(ValueError):
@@ -154,7 +168,13 @@ def validate_fixture(payload: Any) -> None:
             raise FixtureValidationError(
                 f"{where}.expected.clarification must be boolean"
             )
-        if expected["requested_fact_type"] not in REQUESTED_FACT_TYPES:
+        requested_fact_types = _as_expected_values(
+            expected["requested_fact_type"]
+        )
+        if not requested_fact_types or any(
+            value not in REQUESTED_FACT_TYPES
+            for value in requested_fact_types
+        ):
             raise FixtureValidationError(
                 f"{where}.expected.requested_fact_type is invalid"
             )
@@ -211,6 +231,21 @@ def validate_fixture(payload: Any) -> None:
             raise FixtureValidationError(
                 f"{where}.expected.inherited_slots must be a list"
             )
+        if "required_retrieval_stages" in expected:
+            stages = expected["required_retrieval_stages"]
+            if not isinstance(stages, list) or any(
+                stage not in RETRIEVAL_STAGE_NAMES for stage in stages
+            ):
+                raise FixtureValidationError(
+                    f"{where}.expected.required_retrieval_stages is invalid"
+                )
+        if "required_candidate_rank_max" in expected and (
+            not isinstance(expected["required_candidate_rank_max"], int)
+            or expected["required_candidate_rank_max"] < 1
+        ):
+            raise FixtureValidationError(
+                f"{where}.expected.required_candidate_rank_max must be a positive integer"
+            )
         if not _as_expected_values(expected["intent"]):
             raise FixtureValidationError(f"{where}.expected.intent must not be empty")
         if not _as_expected_values(expected["final_modes"]):
@@ -249,10 +284,15 @@ class RecordingRetriever:
 
     def __init__(self, inner: Any) -> None:
         self.inner = inner
+        self.supports_retrieval_plan = callable(
+            getattr(inner, "retrieve_plan", None)
+        )
         self.calls: list[dict[str, Any]] = []
+        self.latest_retrieval_diagnostics: dict[str, Any] | None = None
 
     def reset(self) -> None:
         self.calls = []
+        self.latest_retrieval_diagnostics = None
 
     def retrieve(self, question: str, **kwargs: Any) -> Any:
         chunks = self.inner.retrieve(question, **kwargs)
@@ -270,6 +310,32 @@ class RecordingRetriever:
             }
         )
         return chunks
+
+    def retrieve_plan(self, plan: Any, **kwargs: Any) -> Any:
+        result = self.inner.retrieve_plan(plan, **kwargs)
+        diagnostics = result.to_dict()
+        self.latest_retrieval_diagnostics = diagnostics
+        candidates = diagnostics.get("candidate_provenance") or []
+        stage_queries = diagnostics.get("stage_queries") or {}
+        for stage, queries in stage_queries.items():
+            for query in queries:
+                stage_candidates = [
+                    dict(candidate)
+                    for candidate in candidates
+                    if any(
+                        hit.get("stage") == stage and hit.get("query") == query
+                        for hit in candidate.get("stage_hits") or []
+                    )
+                ]
+                self.calls.append(
+                    {
+                        "query": query,
+                        "stage": stage,
+                        "parameters": _json_safe(kwargs),
+                        "chunks": stage_candidates,
+                    }
+                )
+        return result
 
     def flattened_candidates(self) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
@@ -367,10 +433,10 @@ def evaluate_case(
     expected = case["expected"]
     checks: list[dict[str, Any]] = []
 
-    _check_value(
+    _check_membership(
         checks,
         "requested_fact_type",
-        expected["requested_fact_type"],
+        _as_expected_values(expected["requested_fact_type"]),
         diagnostic.get("requested_fact_type"),
     )
     _check_membership(
@@ -475,6 +541,19 @@ def evaluate_case(
         expected["required_retrieval"],
         diagnostic.get("raw_candidates"),
     )
+    if "required_retrieval_stages" in expected:
+        _check_retrieval_stages(
+            checks,
+            expected["required_retrieval_stages"],
+            diagnostic.get("retrieval_stages"),
+        )
+    if "required_candidate_rank_max" in expected:
+        _check_required_candidate_rank(
+            checks,
+            expected["required_retrieval"],
+            diagnostic.get("raw_candidates"),
+            expected["required_candidate_rank_max"],
+        )
     _check_artifacts(
         checks,
         "context",
@@ -621,6 +700,86 @@ def aggregate_metrics(
             stage="required_retrieval",
             actual_key="raw_candidates",
             rank_limit=10,
+        ),
+        "required_candidate_recall_at_5": _required_artifact_rate(
+            case_by_id,
+            selected_records,
+            stage="required_retrieval",
+            actual_key="raw_candidates",
+            rank_limit=5,
+        ),
+        "required_candidate_recall_at_10": _required_artifact_rate(
+            case_by_id,
+            selected_records,
+            stage="required_retrieval",
+            actual_key="raw_candidates",
+            rank_limit=10,
+        ),
+        "required_candidate_recall_by_stage": _required_recall_by_stage(
+            case_by_id,
+            selected_records,
+        ),
+        "exact_identifier_recall": _required_artifact_rate_for_cases(
+            case_by_id,
+            selected_records,
+            lambda case: "exact_identifier" in (
+                case["expected"].get("required_retrieval_stages") or []
+            ),
+        ),
+        "subject_function_recall": _required_artifact_rate_for_cases(
+            case_by_id,
+            selected_records,
+            lambda case: bool(
+                {
+                    "exact_subject",
+                    "organization_function_lookup",
+                }.intersection(
+                    case["expected"].get("required_retrieval_stages") or []
+                )
+            ),
+        ),
+        "procedure_recall": _required_artifact_rate_for_cases(
+            case_by_id,
+            selected_records,
+            lambda case: "procedure" in case.get("tags", []),
+        ),
+        "organization_function_recall": _required_artifact_rate_for_cases(
+            case_by_id,
+            selected_records,
+            lambda case: "organization_function_lookup" in (
+                case["expected"].get("required_retrieval_stages") or []
+            ),
+        ),
+        "sibling_recall": _required_artifact_rate_for_cases(
+            case_by_id,
+            selected_records,
+            lambda case: "sibling_lookup" in (
+                case["expected"].get("required_retrieval_stages") or []
+            ),
+        ),
+        "candidate_provenance_coverage": _candidate_provenance_coverage(
+            selected_records
+        ),
+        "duplicate_candidates_before_merge": _duplicate_metric(
+            selected_records,
+            "duplicate_count",
+        ),
+        "duplicate_candidates_after_merge": _duplicates_after_merge(
+            selected_records
+        ),
+        "best_score_dedupe_accuracy": _best_score_dedupe_accuracy(
+            selected_records
+        ),
+        "candidate_order_stability": unavailable(
+            "requires repeated execution; see repeatability artifact"
+        ),
+        "retrieval_latency_p50": _retrieval_latency_percentile(
+            selected_records,
+            0.50,
+        ),
+        "retrieval_latency_p95": _retrieval_latency_percentile(
+            selected_records,
+            0.95,
         ),
         "required_chunk_in_context_rate": _required_artifact_rate(
             case_by_id,
@@ -819,6 +978,18 @@ def build_repeatability(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 _observable_scalar(record.get("topic_changed"))
                 for record in case_records
             ],
+            "retrieval_stages": [
+                _retrieval_stage_signature(record.get("retrieval_stages"))
+                for record in case_records
+            ],
+            "stage_queries": [
+                _observable_scalar(record.get("stage_queries"))
+                for record in case_records
+            ],
+            "candidate_order_top_10": [
+                _candidate_order_signature(record.get("raw_candidates"))
+                for record in case_records
+            ],
         }
         max_turns = max(
             (
@@ -882,6 +1053,18 @@ def build_repeatability(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             dimensions[f"turn_{turn_number}_response_kind"] = [
                 _observable_scalar(
                     _turn(record, turn_index).get("response_kind")
+                )
+                for record in case_records
+            ]
+            dimensions[f"turn_{turn_number}_retrieval_stages"] = [
+                _retrieval_stage_signature(
+                    _turn(record, turn_index).get("retrieval_stages")
+                )
+                for record in case_records
+            ]
+            dimensions[f"turn_{turn_number}_candidate_order_top_10"] = [
+                _candidate_order_signature(
+                    _turn(record, turn_index).get("raw_candidates")
                 )
                 for record in case_records
             ]
@@ -1000,6 +1183,8 @@ def _validate_artifact_expectation(value: Any, where: str) -> None:
     for field in ("sources", "record_keys", "chunk_ids"):
         if field not in value or not isinstance(value[field], list):
             raise FixtureValidationError(f"{where}.{field} must be a list")
+    if "sections" in value and not isinstance(value["sections"], list):
+        raise FixtureValidationError(f"{where}.sections must be a list")
 
 
 def _object_mapping(value: Any) -> dict[str, Any]:
@@ -1239,6 +1424,89 @@ def _check_artifacts(
         checks.append(
             _check(f"{stage}_{kind}", passed, value, _artifact_preview(actual), reason)
         )
+
+
+def _check_retrieval_stages(
+    checks: list[dict[str, Any]],
+    expected: Sequence[str],
+    actual: Any,
+) -> None:
+    actual_names = _retrieval_stage_names(actual)
+    if actual_names is None:
+        checks.append(
+            _failed_check(
+                "retrieval_stages",
+                list(expected),
+                actual,
+                "retrieval stage diagnostics are not observable",
+            )
+        )
+        return
+    missing = [stage for stage in expected if stage not in actual_names]
+    checks.append(
+        _check(
+            "retrieval_stages",
+            not missing,
+            list(expected),
+            actual_names,
+            (
+                "required retrieval stages executed"
+                if not missing
+                else f"required retrieval stages missing: {missing!r}"
+            ),
+        )
+    )
+
+
+def _check_required_candidate_rank(
+    checks: list[dict[str, Any]],
+    expected: Mapping[str, Any],
+    actual: Any,
+    max_rank: int,
+) -> None:
+    required = _metric_artifact_expectations(expected)
+    if not required:
+        return
+    if not isinstance(actual, list):
+        checks.append(
+            _failed_check(
+                "required_candidate_rank",
+                max_rank,
+                actual,
+                "candidate ranks are not observable",
+            )
+        )
+        return
+    failures: list[dict[str, Any]] = []
+    ranks: dict[str, Any] = {}
+    for kind, value in required:
+        matching = [
+            item for item in actual if _artifact_present(kind, value, [item])
+        ]
+        observed = [
+            item.get("retrieval_rank")
+            for item in matching
+            if isinstance(item.get("retrieval_rank"), int)
+        ]
+        best_rank = min(observed) if observed else None
+        ranks[f"{kind}:{value}"] = best_rank
+        if best_rank is None or best_rank > max_rank:
+            failures.append(
+                {"kind": kind, "value": value, "rank": best_rank}
+            )
+    checks.append(
+        _check(
+            "required_candidate_rank",
+            not failures,
+            {"max_rank": max_rank, "required": required},
+            ranks,
+            (
+                f"all required candidates are within top {max_rank}"
+                if not failures
+                else f"required candidates outside top {max_rank}: {failures!r}"
+            ),
+        )
+    )
 
 
 def _check_answer_concepts(
@@ -1518,6 +1786,7 @@ def _artifact_expectations(value: Mapping[str, Any]) -> list[tuple[str, Any]]:
     result.extend(("source", item) for item in value.get("sources") or [])
     result.extend(("record_key", item) for item in value.get("record_keys") or [])
     result.extend(("chunk_id", item) for item in value.get("chunk_ids") or [])
+    result.extend(("section", item) for item in value.get("sections") or [])
     return result
 
 
@@ -1535,6 +1804,12 @@ def _artifact_present(
                 isinstance(item.get("metadata"), Mapping)
                 and _normalize(item["metadata"].get("record_key")) == _normalize(value)
             )
+            for item in actual
+        )
+    if kind == "section":
+        return any(
+            _normalize(item.get("section")) == _normalize(value)
+            or _normalize(value) in _normalize(item.get("section"))
             for item in actual
         )
     needle = _normalize(value)
@@ -1561,6 +1836,9 @@ def _artifact_preview(actual: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
             ),
             "title": item.get("title"),
             "source": item.get("source"),
+            "section": item.get("section"),
+            "retrieval_rank": item.get("retrieval_rank"),
+            "stage_hits": item.get("stage_hits"),
         }
         for item in actual[:20]
     ]
@@ -1849,15 +2127,175 @@ def _required_artifact_rate(
     }
 
 
+def _required_artifact_rate_for_cases(
+    case_by_id: Mapping[str, Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+    predicate: Any,
+) -> dict[str, Any] | str:
+    selected_cases = {
+        case_id: case
+        for case_id, case in case_by_id.items()
+        if predicate(case)
+    }
+    if not selected_cases:
+        return "not_available"
+    selected_records = [
+        record
+        for record in records
+        if str(record.get("case_id")) in selected_cases
+    ]
+    return _required_artifact_rate(
+        selected_cases,
+        selected_records,
+        stage="required_retrieval",
+        actual_key="raw_candidates",
+        rank_limit=10,
+    )
+
+
+def _required_recall_by_stage(
+    case_by_id: Mapping[str, Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | str:
+    required_total = 0
+    found_total = 0
+    by_stage: dict[str, int] = defaultdict(int)
+    for record in records:
+        if record.get("status") == "blocked":
+            continue
+        case = case_by_id[str(record["case_id"])]
+        required = _metric_artifact_expectations(
+            case["expected"]["required_retrieval"]
+        )
+        candidates = record.get("raw_candidates")
+        if not required or not isinstance(candidates, list):
+            continue
+        required_total += len(required)
+        for kind, value in required:
+            matching = [
+                candidate
+                for candidate in candidates
+                if _artifact_present(kind, value, [candidate])
+            ]
+            if not matching:
+                continue
+            found_total += 1
+            stages = {
+                stage
+                for candidate in matching
+                for stage in _candidate_stages(candidate)
+            }
+            for stage in stages:
+                by_stage[stage] += 1
+    if not required_total:
+        return "not_available"
+    return {
+        "found": found_total,
+        "required": required_total,
+        "by_stage": dict(sorted(by_stage.items())),
+    }
+
+
+def _candidate_provenance_coverage(
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | str:
+    candidates = [
+        candidate
+        for record in records
+        if isinstance(record.get("raw_candidates"), list)
+        for candidate in record["raw_candidates"]
+        if isinstance(candidate, Mapping)
+    ]
+    if not candidates:
+        return "not_available"
+    covered = sum(1 for candidate in candidates if _candidate_stages(candidate))
+    return {
+        "covered": covered,
+        "candidates": len(candidates),
+        "rate": round(covered / len(candidates), 4),
+    }
+
+
+def _duplicate_metric(
+    records: Sequence[Mapping[str, Any]],
+    key: str,
+) -> int | str:
+    values = [
+        record.get(key)
+        for record in records
+        if isinstance(record.get(key), int)
+    ]
+    return sum(values) if values else "not_available"
+
+
+def _duplicates_after_merge(
+    records: Sequence[Mapping[str, Any]],
+) -> int | str:
+    comparable = 0
+    duplicates = 0
+    for record in records:
+        candidates = record.get("raw_candidates")
+        if not isinstance(candidates, list):
+            continue
+        comparable += 1
+        identities = [
+            _candidate_identity(candidate)
+            for candidate in candidates
+            if isinstance(candidate, Mapping)
+        ]
+        duplicates += len(identities) - len(set(identities))
+    return duplicates if comparable else "not_available"
+
+
+def _best_score_dedupe_accuracy(
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | str:
+    correct = sum(
+        int(record["best_score_dedupe_correct"])
+        for record in records
+        if isinstance(record.get("best_score_dedupe_correct"), int)
+    )
+    checks = sum(
+        int(record["best_score_dedupe_checks"])
+        for record in records
+        if isinstance(record.get("best_score_dedupe_checks"), int)
+    )
+    if not checks:
+        return "not_available"
+    return {
+        "correct": correct,
+        "checks": checks,
+        "rate": round(correct / checks, 4),
+    }
+
+
+def _retrieval_latency_percentile(
+    records: Sequence[Mapping[str, Any]],
+    percentile: float,
+) -> float | str:
+    values = sorted(
+        float(record["retrieval_duration_ms"])
+        for record in records
+        if isinstance(record.get("retrieval_duration_ms"), (int, float))
+    )
+    if not values:
+        return "not_available"
+    index = max(0, min(len(values) - 1, round((len(values) - 1) * percentile)))
+    return round(values[index], 2)
+
+
 def _metric_artifact_expectations(
     value: Mapping[str, Any],
 ) -> list[tuple[str, Any]]:
     """Count stable chunk identities once; use source only as a fallback identity."""
-    identities: list[tuple[str, Any]] = []
-    identities.extend(("record_key", item) for item in value.get("record_keys") or [])
-    identities.extend(("chunk_id", item) for item in value.get("chunk_ids") or [])
-    if identities:
-        return identities
+    for kind, field in (
+        ("record_key", "record_keys"),
+        ("section", "sections"),
+        ("chunk_id", "chunk_ids"),
+    ):
+        values = value.get(field) or []
+        if values:
+            return [(kind, item) for item in values]
     return [("source", item) for item in value.get("sources") or []]
 
 
@@ -2145,6 +2583,65 @@ def _context_signature(value: Any) -> Any:
             item.get("section"),
         )
         for item in value
+    ]
+
+
+def _retrieval_stage_names(value: Any) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    names: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            name = item
+        elif isinstance(item, Mapping):
+            name = item.get("name") or item.get("stage")
+        else:
+            continue
+        if isinstance(name, str) and name not in names:
+            names.append(name)
+    return names
+
+
+def _retrieval_stage_signature(value: Any) -> Any:
+    names = _retrieval_stage_names(value)
+    return names if names is not None else "not_available"
+
+
+def _candidate_stages(candidate: Mapping[str, Any]) -> tuple[str, ...]:
+    hits = candidate.get("stage_hits")
+    if not isinstance(hits, list):
+        return ()
+    names: list[str] = []
+    for hit in hits:
+        name = hit.get("stage") if isinstance(hit, Mapping) else None
+        if isinstance(name, str) and name not in names:
+            names.append(name)
+    return tuple(names)
+
+
+def _candidate_identity(candidate: Mapping[str, Any]) -> str:
+    metadata = candidate.get("metadata")
+    metadata_key = (
+        metadata.get("record_key") if isinstance(metadata, Mapping) else None
+    )
+    record_key = candidate.get("record_key") or metadata_key
+    if record_key:
+        return f"record:{_normalize(record_key)}"
+    if candidate.get("chunk_id") is not None:
+        return f"chunk:{candidate.get('chunk_id')}"
+    return "source:" + "|".join(
+        _normalize(candidate.get(field))
+        for field in ("source", "title", "section")
+    )
+
+
+def _candidate_order_signature(value: Any) -> Any:
+    if not isinstance(value, list):
+        return "not_available"
+    return [
+        _candidate_identity(candidate)
+        for candidate in value[:10]
+        if isinstance(candidate, Mapping)
     ]
 
 

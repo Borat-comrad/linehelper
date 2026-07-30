@@ -4,8 +4,9 @@ import pytest
 
 from linehelper.llm.answer_generator import RagAnswerError, RagAnswerGenerator
 from linehelper.llm.ollama_client import OllamaEmptyResponseError
+from linehelper.memory.memory_store import MemoryStore
 from linehelper.rag.query_analyzer import QueryPlan, fallback_query_plan
-from linehelper.rag.retriever import RetrievedChunk
+from linehelper.rag.retriever import RetrievedChunk, SemanticRetriever
 
 
 @pytest.fixture(autouse=True)
@@ -476,6 +477,147 @@ def test_empty_retrieval_does_not_call_llm() -> None:
     assert result.prompt_length == 0
     assert result.response_kind == "no_answer"
     assert client.messages == []
+
+
+def test_native_retrieval_orchestration_exposes_procedure_provenance(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "memory.db"
+    store = MemoryStore(str(db_path))
+    store.ensure_schema()
+    store.add_chunk(
+        namespace="semantic",
+        doc_type="reference",
+        title="Инструкция Заявка в хозяйственную часть",
+        source="data/raw_docs/equipment_request.pdf",
+        section="Порядок работы",
+        text=(
+            "Создайте заявку в первое отделение и укажите нужное "
+            "оборудование или имущество."
+        ),
+        metadata={
+            "logical_unit_type": "procedure",
+            "logical_unit_title": "Заявка в хозяйственную часть",
+        },
+    )
+    analyzer = FakeQueryAnalyzer(
+        _procedure_plan(
+            normalized_question="Как получить новое оборудование?",
+            subject="новое оборудование",
+            intent="equipment_it_request",
+        )
+    )
+    generator = RagAnswerGenerator(
+        retriever=SemanticRetriever(db_path),
+        llm_client=FakeClient("Используйте заявку в хозяйственную часть."),
+        query_analyzer=analyzer,
+    )
+
+    result = generator.answer("Как получить новое оборудование?")
+
+    assert result.retrieval is not None
+    candidate = next(
+        item
+        for item in result.retrieval["candidate_provenance"]
+        if item["source"] == "data/raw_docs/equipment_request.pdf"
+    )
+    assert "procedure_lookup" in {
+        hit["stage"] for hit in candidate["stage_hits"]
+    }
+    assert result.retrieval["candidate_count_after_dedupe"] >= 1
+
+
+def test_native_retrieval_orchestration_exposes_structured_function_records(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "memory.db"
+    store = MemoryStore(str(db_path))
+    store.ensure_schema()
+    record_keys = {
+        "organization_unit:division_1:2025",
+        "organization_unit:department_2:2025",
+    }
+    for index, record_key in enumerate(sorted(record_keys), start=1):
+        store.add_chunk(
+            namespace="semantic",
+            doc_type="organization_unit",
+            title=f"Подразделение {index}",
+            source="data/raw_docs/company_structure.txt",
+            text=(
+                "Внутренний документооборот: Шкиренков Роман, "
+                "Малахова Мария."
+            ),
+            metadata={
+                "knowledge_domain": "organization_structure",
+                "record_key": record_key,
+            },
+        )
+    analyzer = FakeQueryAnalyzer(
+        QueryPlan(
+            intent="roles_responsibility",
+            normalized_question="Кто отвечает за внутренний документооборот?",
+            query_expansions=[],
+            preferred_sources=[],
+            answer_type="definition",
+            needs_clarification=False,
+            clarification_question=None,
+            confidence=1.0,
+            notes="integration",
+            requested_fact_type="responsible_person",
+            temporal_scope="static",
+            subject="внутренний документооборот",
+        )
+    )
+    generator = RagAnswerGenerator(
+        retriever=SemanticRetriever(db_path),
+        llm_client=FakeClient("Ответ по структурированным записям."),
+        query_analyzer=analyzer,
+    )
+
+    result = generator.answer("Кто отвечает за внутренний документооборот?")
+
+    assert result.retrieval is not None
+    candidates = result.retrieval["candidate_provenance"]
+    assert record_keys <= {
+        item["record_key"] for item in candidates if item.get("record_key")
+    }
+    assert all(
+        "organization_function_lookup"
+        in {hit["stage"] for hit in item["stage_hits"]}
+        for item in candidates
+        if item.get("record_key") in record_keys
+    )
+
+
+def test_validated_fact_type_keeps_unknown_intent_retrieval_plan(tmp_path) -> None:
+    db_path = tmp_path / "memory.db"
+    store = MemoryStore(str(db_path))
+    store.ensure_schema()
+    plan = QueryPlan(
+        intent="unknown",
+        normalized_question="Как оформить неизвестный документ?",
+        query_expansions=[],
+        preferred_sources=[],
+        answer_type="no_answer",
+        needs_clarification=False,
+        clarification_question=None,
+        confidence=1.0,
+        notes="integration",
+        requested_fact_type="procedure",
+        temporal_scope="static",
+        subject="неизвестный документ",
+    )
+    generator = RagAnswerGenerator(
+        retriever=SemanticRetriever(db_path),
+        llm_client=FakeClient("unused"),
+        query_analyzer=FakeQueryAnalyzer(plan),
+    )
+
+    result = generator.answer("Как оформить неизвестный документ?")
+
+    assert result.retrieval is not None
+    assert result.retrieval["retrieval_plan"]["requested_fact_type"] == "procedure"
+    assert "procedure_lookup" in result.retrieval["retrieval_stages"]
 
 
 def test_vacation_question_filters_noisy_context_chunks() -> None:
@@ -1061,6 +1203,28 @@ def _roles_responsibility_plan() -> QueryPlan:
         clarification_question=None,
         confidence=0.9,
         notes="test plan",
+    )
+
+
+def _procedure_plan(
+    *,
+    normalized_question: str,
+    subject: str,
+    intent: str,
+) -> QueryPlan:
+    return QueryPlan(
+        intent=intent,
+        normalized_question=normalized_question,
+        query_expansions=[],
+        preferred_sources=[],
+        answer_type="procedure",
+        needs_clarification=False,
+        clarification_question=None,
+        confidence=1.0,
+        notes="integration",
+        requested_fact_type="procedure",
+        temporal_scope="static",
+        subject=subject,
     )
 
 
