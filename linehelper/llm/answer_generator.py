@@ -780,6 +780,7 @@ class RagAnswerGenerator:
 def _query_plan_diagnostics(query_plan: QueryPlan) -> dict[str, Any]:
     raw_clarification = query_plan.raw_clarification
     validated_clarification = query_plan.clarification
+    fact_type_resolution = query_plan.fact_type_resolution.to_dict()
     return {
         "enabled": True,
         "intent": query_plan.intent,
@@ -787,6 +788,21 @@ def _query_plan_diagnostics(query_plan: QueryPlan) -> dict[str, Any]:
         "answer_type": query_plan.answer_type,
         "requested_fact_type": query_plan.requested_fact_type,
         "raw_requested_fact_type": query_plan.raw_requested_fact_type,
+        "initial_requested_fact_type": fact_type_resolution[
+            "initial_fact_type"
+        ],
+        "finalized_requested_fact_type": fact_type_resolution[
+            "resolved_fact_type"
+        ],
+        "fact_type_resolution": fact_type_resolution,
+        "resolution_status": fact_type_resolution["resolution_status"],
+        "matched_signals": list(fact_type_resolution["matched_signals"]),
+        "rejected_fact_types": list(
+            fact_type_resolution["rejected_candidates"]
+        ),
+        "decision_reasons": list(
+            fact_type_resolution["decision_reasons"]
+        ),
         "temporal_scope": query_plan.temporal_scope,
         "raw_temporal_scope": query_plan.raw_temporal_scope,
         "subject": query_plan.subject,
@@ -859,6 +875,24 @@ def _pending_clarification_diagnostics(
         "answer_type": "clarification",
         "requested_fact_type": "unknown",
         "raw_requested_fact_type": None,
+        "initial_requested_fact_type": "unknown",
+        "finalized_requested_fact_type": "unknown",
+        "fact_type_resolution": {
+            "initial_fact_type": "unknown",
+            "resolved_fact_type": "unknown",
+            "resolution_status": "insufficient_signals",
+            "matched_signals": [],
+            "rejected_candidates": [],
+            "decision_reasons": [
+                "pending_clarification_not_resolved"
+            ],
+        },
+        "resolution_status": "insufficient_signals",
+        "matched_signals": [],
+        "rejected_fact_types": [],
+        "decision_reasons": [
+            "pending_clarification_not_resolved"
+        ],
         "temporal_scope": "unknown",
         "raw_temporal_scope": None,
         "subject": "",

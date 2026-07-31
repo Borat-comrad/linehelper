@@ -283,6 +283,27 @@ def _print_chat_result(result: RagAnswer, *, debug: bool) -> None:
         print(f"intent: {query_plan.get('intent') or '-'}")
         print(f"raw intent: {query_plan.get('raw_intent') or '-'}")
         print(f"requested fact type: {query_plan.get('requested_fact_type') or '-'}")
+        print(
+            "requested fact type initial/finalized: "
+            f"{query_plan.get('initial_requested_fact_type') or '-'}/"
+            f"{query_plan.get('finalized_requested_fact_type') or '-'}"
+        )
+        print(
+            "fact type resolution status: "
+            f"{query_plan.get('resolution_status') or '-'}"
+        )
+        print(
+            "fact type matched signals: "
+            f"{_join(query_plan.get('matched_signals'))}"
+        )
+        print(
+            "fact type rejected candidates: "
+            f"{_join(query_plan.get('rejected_fact_types'))}"
+        )
+        print(
+            "fact type decision reasons: "
+            f"{_join(query_plan.get('decision_reasons'))}"
+        )
         print(f"temporal scope: {query_plan.get('temporal_scope') or '-'}")
         print(f"subject: {query_plan.get('subject') or '-'}")
         print(f"operational lookup: {query_plan.get('operational_lookup', False)}")

@@ -9,6 +9,11 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Protocol
 
 from linehelper.llm.ollama_client import OllamaClient
+from linehelper.rag.requested_fact_type_resolver import (
+    ALLOWED_REQUESTED_FACT_TYPES,
+    RequestedFactTypeResolution,
+    RequestedFactTypeResolver,
+)
 
 
 DEFAULT_ANALYZER_MODEL = "qwen2.5:3b"
@@ -55,24 +60,6 @@ ALLOWED_ANSWER_TYPES = frozenset(
         "partial_answer",
         "no_answer",
         "general",
-    }
-)
-
-ALLOWED_REQUESTED_FACT_TYPES = frozenset(
-    {
-        "definition",
-        "procedure",
-        "responsible_person",
-        "primary_contact",
-        "unit_head",
-        "document_recipient",
-        "list",
-        "comparison",
-        "current_status",
-        "current_value",
-        "price",
-        "availability",
-        "unknown",
     }
 )
 
@@ -251,6 +238,9 @@ class QueryPlan:
     raw_clarification: ClarificationPlan | None = None
     clarification_action: str = "continue_retrieval"
     clarification_validation_reasons: list[str] = field(default_factory=list)
+    fact_type_resolution: RequestedFactTypeResolution = field(
+        default_factory=RequestedFactTypeResolution
+    )
 
     def to_dict(self) -> dict[str, Any]:
         """Return a plain dict for diagnostics and smoke scripts."""
@@ -1056,24 +1046,50 @@ def _validate_query_plan_v2(
     ):
         _append_reason(reasons, "invalid_temporal_scope")
 
-    requested_fact_type = (
-        plan.requested_fact_type
-        if plan.requested_fact_type in ALLOWED_REQUESTED_FACT_TYPES
+    prior_resolution = plan.fact_type_resolution
+    initial_candidate = (
+        prior_resolution.initial_fact_type
+        if (
+            prior_resolution.decision_reasons
+            or prior_resolution.matched_signals
+            or prior_resolution.rejected_candidates
+        )
+        else plan.requested_fact_type
+    )
+    initial_requested_fact_type = (
+        initial_candidate
+        if initial_candidate in ALLOWED_REQUESTED_FACT_TYPES
         else "unknown"
     )
-    inferred_fact_type, fact_reason = _infer_requested_fact_type(
-        normalized_question,
-        plan,
+
+    subject = _normalize_subject(plan.subject)
+    subject_was_inferred = False
+    if not subject:
+        subject = _infer_subject(normalized_question)
+        subject_was_inferred = bool(subject)
+
+    fact_type_resolution = RequestedFactTypeResolver().resolve(
+        normalized_question=normalized_question,
+        intent=plan.intent,
+        subject=subject,
+        entities=(),
+        answer_shape=plan.answer_type,
+        draft_requested_fact_type=initial_requested_fact_type,
+        metadata={
+            "raw_requested_fact_type": raw_requested_fact_type,
+            "raw_intent": plan.raw_intent,
+        },
     )
-    if inferred_fact_type != "unknown":
-        if requested_fact_type != inferred_fact_type:
-            requested_fact_type = inferred_fact_type
-            _append_reason(reasons, fact_reason)
-    elif requested_fact_type == "unknown":
-        inferred_from_plan = _fact_type_from_plan(plan)
-        if inferred_from_plan != "unknown":
-            requested_fact_type = inferred_from_plan
-            _append_reason(reasons, "requested_fact_type_inferred_from_plan")
+    requested_fact_type = fact_type_resolution.resolved_fact_type
+    if (
+        fact_type_resolution.resolution_status
+        in {"resolved_from_structure", "resolved_from_intent"}
+        and requested_fact_type != initial_requested_fact_type
+    ):
+        for reason in fact_type_resolution.decision_reasons:
+            _append_reason(reasons, reason)
+    elif fact_type_resolution.resolution_status == "ambiguous":
+        _append_reason(reasons, "requested_fact_type_ambiguous")
 
     temporal_scope = (
         plan.temporal_scope
@@ -1087,12 +1103,8 @@ def _validate_query_plan_v2(
     if inferred_temporal_scope != "unknown" and temporal_scope != inferred_temporal_scope:
         temporal_scope = inferred_temporal_scope
         _append_reason(reasons, temporal_reason)
-
-    subject = _normalize_subject(plan.subject)
-    if not subject:
-        subject = _infer_subject(normalized_question)
-        if subject:
-            _append_reason(reasons, "subject_inferred")
+    if subject_was_inferred:
+        _append_reason(reasons, "subject_inferred")
 
     operational_lookup, operational_reason = _operational_decision(
         requested_fact_type,
@@ -1130,6 +1142,7 @@ def _validate_query_plan_v2(
         operational_lookup=operational_lookup,
         operational_decision_reason=operational_reason,
         validation_reasons=reasons,
+        fact_type_resolution=fact_type_resolution,
     )
 
 

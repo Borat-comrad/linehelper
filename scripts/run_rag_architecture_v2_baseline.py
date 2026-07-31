@@ -477,6 +477,41 @@ def _run_full_case(
                 if isinstance(query_plan, dict)
                 else unavailable("QueryPlan diagnostics are unavailable")
             ),
+            "initial_requested_fact_type": (
+                query_plan.get("initial_requested_fact_type")
+                if isinstance(query_plan, dict)
+                else unavailable("QueryPlan diagnostics are unavailable")
+            ),
+            "finalized_requested_fact_type": (
+                query_plan.get("finalized_requested_fact_type")
+                if isinstance(query_plan, dict)
+                else unavailable("QueryPlan diagnostics are unavailable")
+            ),
+            "fact_type_resolution": (
+                query_plan.get("fact_type_resolution")
+                if isinstance(query_plan, dict)
+                else unavailable("QueryPlan diagnostics are unavailable")
+            ),
+            "fact_type_resolution_status": (
+                query_plan.get("resolution_status")
+                if isinstance(query_plan, dict)
+                else unavailable("QueryPlan diagnostics are unavailable")
+            ),
+            "fact_type_matched_signals": (
+                query_plan.get("matched_signals")
+                if isinstance(query_plan, dict)
+                else unavailable("QueryPlan diagnostics are unavailable")
+            ),
+            "rejected_fact_types": (
+                query_plan.get("rejected_fact_types")
+                if isinstance(query_plan, dict)
+                else unavailable("QueryPlan diagnostics are unavailable")
+            ),
+            "fact_type_decision_reasons": (
+                query_plan.get("decision_reasons")
+                if isinstance(query_plan, dict)
+                else unavailable("QueryPlan diagnostics are unavailable")
+            ),
             "temporal_scope": temporal_scope,
             "raw_temporal_scope": (
                 query_plan.get("raw_temporal_scope")
@@ -780,6 +815,27 @@ def _run_retrieval_only_case(
                 "raw_requested_fact_type": unavailable(
                     "not executed in retrieval-only mode"
                 ),
+                "initial_requested_fact_type": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "finalized_requested_fact_type": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "fact_type_resolution": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "fact_type_resolution_status": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "fact_type_matched_signals": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "rejected_fact_types": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "fact_type_decision_reasons": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
                 "temporal_scope": unavailable(
                     "not executed in retrieval-only mode"
                 ),
@@ -981,6 +1037,13 @@ def _empty_diagnostic(
         "query_plan": marker,
         "requested_fact_type": marker,
         "raw_requested_fact_type": marker,
+        "initial_requested_fact_type": marker,
+        "finalized_requested_fact_type": marker,
+        "fact_type_resolution": marker,
+        "fact_type_resolution_status": marker,
+        "fact_type_matched_signals": marker,
+        "rejected_fact_types": marker,
+        "fact_type_decision_reasons": marker,
         "temporal_scope": marker,
         "raw_temporal_scope": marker,
         "subject": marker,
