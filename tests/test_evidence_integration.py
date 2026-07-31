@@ -52,9 +52,22 @@ def test_t04_orchestration_returns_partial_answer_with_known_procedure() -> None
     assert [source.title for source in result.sources] == [
         "Инструкция Согласования командировки"
     ]
+    assert result.answer_contract is not None
+    assert result.answer_contract["answer_mode"] == "partial_answer"
+    assert result.answer_contract["allowed_chunk_ids"] == [47]
+    assert result.answer_contract["unsupported_requirement_ids"] == [
+        "named_document_recipient"
+    ]
+    assert result.final_answer_sections == [
+        "supported_answer",
+        "missing_information",
+        "sources",
+    ]
+    assert "Нет данных по следующим пунктам:" in result.answer
+    assert "именованный первоначальный адресат" in result.answer
     prompt = client.messages[-1]["content"]
-    assert "именованный первоначальный адресат" in prompt
-    assert "не заполняй пробелы предположениями" in prompt
+    assert "именованный первоначальный адресат" not in prompt
+    assert "не заполняй пробелы" in prompt
 
 
 def test_t03_orchestration_uses_required_chunk_and_excludes_noise() -> None:
@@ -109,6 +122,12 @@ def test_t03_orchestration_uses_required_chunk_and_excludes_noise() -> None:
     assert [source.title for source in result.sources] == [
         "Инструкция Заявка в 1 отделение хоз.часть"
     ]
+    assert result.answer_contract is not None
+    assert result.answer_contract["allowed_chunk_ids"] == [29]
+    assert [
+        source["chunk_id"]
+        for source in result.answer_contract["source_entries"]
+    ] == [29]
     prompt = client.messages[-1]["content"]
     assert "заявку в хоз.часть" in prompt
     assert "Порядок согласования договора" not in prompt
@@ -285,6 +304,12 @@ def test_t02_t05a_t06_t08_or01_evidence_regression() -> None:
         assert result.evidence is not None
         assert result.evidence["answer_mode"] == "full_answer"
         assert required_ids <= set(result.evidence["supporting_chunk_ids"])
+        assert result.answer_contract is not None
+        assert result.answer_contract["answer_mode"] == "full_answer"
+        assert required_ids <= set(
+            result.answer_contract["allowed_chunk_ids"]
+        )
+        assert "Нет данных по следующим пунктам:" not in result.answer
 
 
 class _FakeAnalyzer:

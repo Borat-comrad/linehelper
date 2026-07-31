@@ -369,6 +369,37 @@ def _print_chat_result(result: RagAnswer, *, debug: bool) -> None:
             "evidence decision reasons: "
             f"{_join(evidence.get('decision_reasons'))}"
         )
+        answer_contract = result.answer_contract or {}
+        contract_validation = result.contract_validation or {}
+        print(
+            "answer contract mode: "
+            f"{answer_contract.get('answer_mode', '-')}"
+        )
+        print(
+            "answer contract allowed chunks: "
+            f"{_join(answer_contract.get('allowed_chunk_ids'))}"
+        )
+        print(
+            "answer contract supported requirements: "
+            f"{_join(answer_contract.get('supported_requirement_ids'))}"
+        )
+        print(
+            "answer contract unsupported requirements: "
+            f"{_join(answer_contract.get('unsupported_requirement_ids'))}"
+        )
+        print(
+            "contract valid/fallback: "
+            f"{contract_validation.get('valid', '-')}/"
+            f"{contract_validation.get('fallback_applied', '-')}"
+        )
+        print(
+            "contract violations: "
+            f"{_join(contract_validation.get('violations'))}"
+        )
+        print(
+            "final answer sections: "
+            f"{_join(result.final_answer_sections)}"
+        )
         print(f"found chunks: {result.chunks_used}")
         print(f"diagnostic chunks: {len(result.diagnostic_candidates)}")
         print(f"elapsed seconds: {result.elapsed_seconds}")

@@ -467,11 +467,8 @@ def test_empty_retrieval_does_not_call_llm() -> None:
 
     result = generator.answer("Нет ли ответа?")
 
-    assert result.answer == (
-        "В базе знаний Serviceline нет точного ответа на этот вопрос. "
-        "Похоже, вопрос не относится к корпоративным регламентам, инструкциям, "
-        "оргструктуре или документообороту."
-    )
+    assert "В найденных источниках недостаточно данных" in result.answer
+    assert "Нет данных по следующим пунктам:" in result.answer
     assert result.sources == []
     assert result.chunks_used == 0
     assert result.prompt_length == 0
@@ -872,7 +869,8 @@ def test_off_topic_question_returns_no_answer_without_sources_or_llm() -> None:
     assert result.chunks_used == 0
     assert result.prompt_length == 0
     assert result.diagnostic_candidates
-    assert "нет точного ответа" in result.answer
+    assert "недостаточно данных" in result.answer
+    assert "Нет данных по следующим пунктам:" in result.answer
     assert client.messages == []
 
 
@@ -955,11 +953,8 @@ def test_problematic_random_matches_return_no_answer_without_sources_or_llm(
     assert result.chunks_used == 0
     assert result.prompt_length == 0
     assert len(result.diagnostic_candidates) == len(chunks)
-    assert result.answer == (
-        "В базе знаний Serviceline нет точного ответа на этот вопрос. "
-        "Похоже, вопрос не относится к корпоративным регламентам, инструкциям, "
-        "оргструктуре или документообороту."
-    )
+    assert "В найденных источниках недостаточно данных" in result.answer
+    assert "Нет данных по следующим пунктам:" in result.answer
     assert client.messages == []
 
 
@@ -1073,14 +1068,20 @@ def test_llm_error_is_wrapped() -> None:
         generator.answer("Что такое тест?")
 
 
-def test_empty_llm_answer_is_error() -> None:
+def test_empty_llm_answer_uses_safe_contract_fallback() -> None:
     generator = RagAnswerGenerator(
         retriever=FakeRetriever([_chunk()]),
         llm_client=FakeClient("   "),
     )
 
-    with pytest.raises(RagAnswerError, match="empty answer"):
-        generator.answer("Что такое тест?")
+    result = generator.answer("Что такое тест?")
+
+    assert "безопасно сформировать содержательную часть" in result.answer
+    assert result.contract_validation is not None
+    assert result.contract_validation["fallback_applied"] is True
+    assert result.contract_validation["violations"] == [
+        "empty_supported_answer_draft"
+    ]
 
 
 class FakeRetriever:

@@ -17,10 +17,24 @@ def build_rag_prompt(
     *,
     max_context_chars: int = 8000,
     evidence_decision: Mapping[str, Any] | None = None,
+    answer_contract: Mapping[str, Any] | None = None,
 ) -> str:
     """Build a Russian RAG prompt from a question and retrieved chunks."""
     sources_text = _format_sources(chunks, max_context_chars=max_context_chars)
-    evidence_text = _format_evidence_guidance(evidence_decision)
+    evidence_text = (
+        _format_answer_contract_guidance(answer_contract)
+        if answer_contract
+        else _format_evidence_guidance(evidence_decision)
+    )
+    partial_guidance = (
+        (
+            "Формируй только содержательную часть, подтверждённую контрактом. "
+            "Не описывай отсутствующие сведения и не добавляй источники: "
+            "эти секции построит deterministic renderer."
+        )
+        if answer_contract
+        else "Если источники дают только частичный ответ, прямо скажи, чего в них нет."
+    )
 
     return "\n".join(
         [
@@ -38,7 +52,7 @@ def build_rag_prompt(
             "Если пользователь спрашивает, что делать, давай практические шаги только из источников.",
             "Если вопрос сравнивает два понятия или действия, сначала ответь \"да\" или \"нет\", затем кратко объясни различие по источникам.",
             "Не подменяй сравнение процедурой только одной из сторон.",
-            "Если источники дают только частичный ответ, прямо скажи, чего в них нет.",
+            partial_guidance,
             "Если источники противоречат друг другу, укажи на это.",
             "Не добавляй раздел \"Источники\", \"Источник\" или \"Источники ответа\" в тело ответа.",
             "Не перечисляй названия документов в теле ответа: источники будут показаны интерфейсом отдельно.",
@@ -59,6 +73,48 @@ def build_rag_prompt(
             "5. Если вопрос сравнительный, сначала дай прямой ответ да/нет и сравни обе стороны.",
             "6. Если есть порядок действий - оформи его по шагам.",
             "7. Не добавляй список источников: UI покажет источники отдельно.",
+        ]
+    )
+
+
+def _format_answer_contract_guidance(
+    answer_contract: Mapping[str, Any],
+) -> str:
+    """Expose only contract-approved facts to the answer LLM."""
+    mode = str(answer_contract.get("answer_mode") or "full_answer")
+    requirements = answer_contract.get("supported_requirements")
+    values = (
+        requirements
+        if isinstance(requirements, Sequence)
+        and not isinstance(requirements, (str, bytes))
+        else []
+    )
+    supported = [
+        str(value.get("description") or value.get("requirement_id"))
+        for value in values
+        if isinstance(value, Mapping)
+    ]
+    allowed_chunk_ids = answer_contract.get("allowed_chunk_ids")
+    chunk_ids = (
+        allowed_chunk_ids
+        if isinstance(allowed_chunk_ids, Sequence)
+        and not isinstance(allowed_chunk_ids, (str, bytes))
+        else []
+    )
+
+    return "\n".join(
+        [
+            "Контракт подтверждённого ответа:",
+            f"Режим: {mode}.",
+            "Разрешённые требования: "
+            + ("; ".join(supported) if supported else "нет."),
+            "Разрешённые evidence chunks: "
+            + (", ".join(str(value) for value in chunk_ids) if chunk_ids else "нет."),
+            (
+                "Сформируй только подтверждённую содержательную часть. "
+                "Не обсуждай неподтверждённые требования, не заполняй пробелы "
+                "предположениями и не добавляй блок источников."
+            ),
         ]
     )
 

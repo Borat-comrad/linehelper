@@ -327,6 +327,12 @@ def _run_full_case(
         evidence = result.evidence or unavailable(
             "RagAnswer did not expose evidence diagnostics"
         )
+        answer_contract = result.answer_contract or unavailable(
+            "RagAnswer did not expose answer contract diagnostics"
+        )
+        contract_validation = result.contract_validation or unavailable(
+            "RagAnswer did not expose contract validation diagnostics"
+        )
         intent = (
             query_plan.get("intent")
             if isinstance(query_plan, dict) and query_plan.get("intent")
@@ -596,7 +602,43 @@ def _run_full_case(
                 "evidence_requirements",
             ),
             "evidence_decision": evidence,
-            "answer_mode": _evidence_value(evidence, "answer_mode"),
+            "answer_contract": answer_contract,
+            "answer_mode": _answer_contract_value(
+                answer_contract,
+                "answer_mode",
+            ),
+            "supported_requirement_ids": _answer_contract_value(
+                answer_contract,
+                "supported_requirement_ids",
+            ),
+            "unsupported_requirement_ids": _answer_contract_value(
+                answer_contract,
+                "unsupported_requirement_ids",
+            ),
+            "allowed_chunk_ids": _answer_contract_value(
+                answer_contract,
+                "allowed_chunk_ids",
+            ),
+            "rendered_source_entries": _answer_contract_value(
+                answer_contract,
+                "source_entries",
+            ),
+            "contract_validation": contract_validation,
+            "validation_violations": _answer_contract_value(
+                contract_validation,
+                "violations",
+            ),
+            "fallback_applied": _answer_contract_value(
+                contract_validation,
+                "fallback_applied",
+            ),
+            "final_answer_sections": (
+                list(result.final_answer_sections)
+                if result.final_answer_sections is not None
+                else unavailable(
+                    "RagAnswer did not expose final answer sections"
+                )
+            ),
             "supporting_chunk_ids": _evidence_value(
                 evidence,
                 "supporting_chunk_ids",
@@ -816,6 +858,33 @@ def _run_retrieval_only_case(
                 "evidence_decision": unavailable(
                     "not executed in retrieval-only mode"
                 ),
+                "answer_contract": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "supported_requirement_ids": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "unsupported_requirement_ids": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "allowed_chunk_ids": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "rendered_source_entries": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "contract_validation": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "validation_violations": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "fallback_applied": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "final_answer_sections": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
                 "evidence_plan": unavailable(
                     "not executed in retrieval-only mode"
                 ),
@@ -952,6 +1021,15 @@ def _empty_diagnostic(
         "evidence_plan": marker,
         "evidence_requirements": marker,
         "evidence_decision": marker,
+        "answer_contract": marker,
+        "supported_requirement_ids": marker,
+        "unsupported_requirement_ids": marker,
+        "allowed_chunk_ids": marker,
+        "rendered_source_entries": marker,
+        "contract_validation": marker,
+        "validation_violations": marker,
+        "fallback_applied": marker,
+        "final_answer_sections": marker,
         "answer_mode": marker,
         "supporting_chunk_ids": marker,
         "non_supporting_chunk_ids": marker,
@@ -1143,6 +1221,12 @@ def _evidence_value(evidence: Any, key: str) -> Any:
     if isinstance(evidence, dict) and key in evidence:
         return evidence[key]
     return unavailable(f"{key} is absent from evidence diagnostics")
+
+
+def _answer_contract_value(contract: Any, key: str) -> Any:
+    if isinstance(contract, dict) and key in contract:
+        return contract[key]
+    return unavailable(f"{key} is absent from answer contract diagnostics")
 
 
 def _flatten_stage_queries(retrieval: dict[str, Any]) -> list[str]:

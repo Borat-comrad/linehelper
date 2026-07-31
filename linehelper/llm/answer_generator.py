@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from linehelper.llm.ollama_client import OllamaClient, OllamaError
+from linehelper.rag.answer_contract import (
+    AnswerContractBuilder,
+    AnswerContractValidator,
+    GroundedAnswerRenderer,
+)
 from linehelper.rag.prompt_builder import build_rag_prompt
 from linehelper.rag.conversation_resolver import (
     ConversationContext,
@@ -299,6 +304,9 @@ class RagAnswer:
     retrieval: dict[str, Any] | None = None
     context: dict[str, Any] | None = None
     evidence: dict[str, Any] | None = None
+    answer_contract: dict[str, Any] | None = None
+    contract_validation: dict[str, Any] | None = None
+    final_answer_sections: list[str] | None = None
 
 
 def rag_answer_history_metadata(result: RagAnswer) -> dict[str, Any]:
@@ -554,6 +562,8 @@ class RagAnswerGenerator:
         )
         evidence_diagnostics = evidence_decision.to_dict()
         evidence_chunks = list(evidence_decision.supporting_chunks)
+        answer_contract = AnswerContractBuilder().build(evidence_decision)
+        answer_contract_diagnostics = answer_contract.to_dict()
         sources = [_source_from_chunk(chunk) for chunk in evidence_chunks]
         diagnostic_candidates = [
             _source_from_chunk(chunk)
@@ -562,9 +572,18 @@ class RagAnswerGenerator:
         ]
 
         if evidence_decision.mode == "insufficient_evidence":
+            contract_validation = AnswerContractValidator().validate(
+                "",
+                answer_contract,
+            )
+            rendered = GroundedAnswerRenderer().render(
+                "",
+                answer_contract,
+                contract_validation,
+            )
             return RagAnswer(
                 question=clean_question,
-                answer=_no_answer_message(intent),
+                answer=rendered.answer,
                 model=self.llm_client.model,
                 sources=[],
                 chunks_used=0,
@@ -582,13 +601,18 @@ class RagAnswerGenerator:
                 retrieval=retrieval_diagnostics,
                 context=context_diagnostics,
                 evidence=evidence_diagnostics,
+                answer_contract=answer_contract_diagnostics,
+                contract_validation=contract_validation.to_dict(),
+                final_answer_sections=list(
+                    rendered.final_answer_sections
+                ),
             )
 
         prompt = build_rag_prompt(
             resolved_question,
             evidence_chunks,
             max_context_chars=self.context_char_budget,
-            evidence_decision=evidence_diagnostics,
+            answer_contract=answer_contract.to_prompt_dict(),
         )
         messages = [
             {"role": "system", "content": SYSTEM_MESSAGE},
@@ -600,13 +624,19 @@ class RagAnswerGenerator:
         except OllamaError as exc:
             raise RagAnswerError(str(exc)) from exc
 
-        answer_text = strip_trailing_source_block(answer_text)
-        if not answer_text.strip():
-            raise RagAnswerError("LLM returned an empty answer.")
+        contract_validation = AnswerContractValidator().validate(
+            answer_text,
+            answer_contract,
+        )
+        rendered = GroundedAnswerRenderer().render(
+            answer_text,
+            answer_contract,
+            contract_validation,
+        )
 
         return RagAnswer(
             question=clean_question,
-            answer=answer_text.strip(),
+            answer=rendered.answer,
             model=self.llm_client.model,
             sources=sources,
             chunks_used=len(evidence_chunks),
@@ -628,6 +658,9 @@ class RagAnswerGenerator:
             retrieval=retrieval_diagnostics,
             context=context_diagnostics,
             evidence=evidence_diagnostics,
+            answer_contract=answer_contract_diagnostics,
+            contract_validation=contract_validation.to_dict(),
+            final_answer_sections=list(rendered.final_answer_sections),
         )
 
     def _retrieve_comparison_candidates(
