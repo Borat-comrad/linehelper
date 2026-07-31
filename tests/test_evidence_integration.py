@@ -134,6 +134,93 @@ def test_t03_orchestration_uses_required_chunk_and_excludes_noise() -> None:
     assert "Порядок создания заявки для IT" not in prompt
 
 
+def test_pr01_metadata_matched_procedure_is_not_generic_no_answer() -> None:
+    question = "Как оформить командировку?"
+    chunks = [
+        _chunk(
+            47,
+            title="Инструкция Согласования командировки",
+            source="data/raw_docs/Инструкция командировки.pdf",
+            section="Согласование командировки",
+            text="Создайте СЗ_Командировка и заполните обязательные поля.",
+            logical_unit_type="procedure",
+            score=370.0,
+        ),
+        _chunk(
+            24,
+            title="Навигатор команды",
+            source="data/raw_docs/Навигатор команды.pdf",
+            section="Общие правила",
+            text="Общие правила работы сотрудника.",
+            logical_unit_type="procedure",
+            score=250.0,
+        ),
+    ]
+    result = _generator(
+        plan=_plan(
+            question,
+            requested_fact_type="procedure",
+            subject="формирование командировки",
+            intent="business_trip",
+        ),
+        chunks=chunks,
+        client=_FakeClient(),
+    ).answer(question)
+
+    assert result.response_kind == "answer"
+    assert result.evidence is not None
+    assert result.evidence["answer_mode"] == "full_answer"
+    assert result.evidence["supporting_chunk_ids"] == [47]
+    assert result.evidence["non_supporting_chunk_ids"] == [24]
+    assert [source.title for source in result.sources] == [
+        "Инструкция Согласования командировки"
+    ]
+
+
+def test_mr08_negative_subject_rejects_other_document_sources() -> None:
+    question = "Как оформить документ, которого нет в базе?"
+    chunks = [
+        _chunk(
+            48,
+            title="Инструкция Согласования приказов в Документообороте",
+            source="data/raw_docs/Инструкция приказов.pdf",
+            section="Согласование приказов",
+            text="Создайте приказ и запустите согласование.",
+            logical_unit_type="procedure",
+            score=365.0,
+        ),
+        _chunk(
+            45,
+            title="Инструкция Согласования договоров в Документообороте",
+            source="data/raw_docs/Инструкция договоров.pdf",
+            section="Согласование договоров",
+            text="Создайте договор и запустите согласование.",
+            logical_unit_type="procedure",
+            score=360.0,
+        ),
+    ]
+    result = _generator(
+        plan=_plan(
+            question,
+            requested_fact_type="procedure",
+            subject="документооборот",
+            intent="unknown",
+        ),
+        chunks=chunks,
+        client=_FakeClient(),
+    ).answer(question)
+
+    assert result.response_kind == "no_answer"
+    assert result.evidence is not None
+    assert result.evidence["answer_mode"] == "insufficient_evidence"
+    assert result.evidence["supporting_chunk_ids"] == []
+    assert result.evidence["non_supporting_chunk_ids"] == [48, 45]
+    assert result.sources == []
+    assert result.answer_contract is not None
+    assert result.answer_contract["allowed_chunk_ids"] == []
+    assert result.answer_contract["source_entries"] == []
+
+
 def test_t02_t05a_t06_t08_or01_evidence_regression() -> None:
     cases = [
         (
@@ -311,6 +398,45 @@ def test_t02_t05a_t06_t08_or01_evidence_regression() -> None:
         )
         assert "Нет данных по следующим пунктам:" not in result.answer
 
+    compound_question = "Кто отвечает за рабочие места и оборудование?"
+    compound_result = _generator(
+        plan=_plan(
+            compound_question,
+            requested_fact_type="responsible_person",
+            subject="отдел рабочих мест и оборудования",
+            intent="roles_responsibility",
+        ),
+        chunks=[
+            _chunk(
+                577,
+                title="Ответственный за рабочие места",
+                source="data/raw_docs/organization.txt",
+                section="Справочник сотрудников",
+                text=(
+                    "Сотрудник отвечает за системное администрирование "
+                    "и рабочие места."
+                ),
+                score=400.0,
+                entity_type="employee",
+                record_key="employee:workplaces",
+                doc_type="employee_role",
+            )
+        ],
+        client=_FakeClient(),
+    ).answer(compound_question)
+    assert compound_result.response_kind == "partial_answer"
+    assert compound_result.evidence is not None
+    assert compound_result.evidence["supporting_chunk_ids"] == [577]
+    assert compound_result.evidence["supported_requirements"] == [
+        "responsible_identity"
+    ]
+    assert compound_result.evidence["unsupported_requirements"] == [
+        "complete_responsibility_scope"
+    ]
+    assert [source.title for source in compound_result.sources] == [
+        "Ответственный за рабочие места"
+    ]
+
 
 class _FakeAnalyzer:
     def __init__(self, plan: QueryPlan) -> None:
@@ -391,10 +517,11 @@ def _chunk(
     sibling: bool = False,
     entity_type: str | None = None,
     record_key: str | None = None,
+    doc_type: str = "test",
 ) -> RetrievedChunk:
     metadata: dict[str, object] = {
         "logical_unit_title": section,
-        "doc_type": "test",
+        "doc_type": doc_type,
     }
     if logical_unit_type:
         metadata["logical_unit_type"] = logical_unit_type
@@ -414,7 +541,7 @@ def _chunk(
         text=text,
         score=score,
         metadata=metadata,
-        doc_type="test",
+        doc_type=doc_type,
         base_score=score,
         rerank_score=score,
         final_score=score,

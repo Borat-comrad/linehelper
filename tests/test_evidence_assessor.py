@@ -209,6 +209,138 @@ def test_structured_responsibility_requires_subject_match() -> None:
     ] == [592, 73]
 
 
+def test_procedure_subject_match_uses_structured_metadata() -> None:
+    question = "Как оформить командировку?"
+    plan = _evidence_plan(
+        question,
+        requested_fact_type="procedure",
+        subject="формирование командировки",
+    )
+    decision = EvidenceAssessor().assess(
+        question,
+        [
+            _chunk(
+                801,
+                title="Инструкция согласования командировки",
+                section="Согласование командировки",
+                text="Создайте служебную записку и запустите обработку.",
+                logical_unit_type="procedure",
+            )
+        ],
+        plan=plan,
+    )
+
+    assert decision.mode == "full_answer"
+    assert [chunk.chunk_id for chunk in decision.supporting_chunks] == [801]
+    diagnostic = decision.chunk_assessments[0]
+    assert "title" in diagnostic.subject_match_source
+    assert any(
+        term.startswith("командир")
+        for term in diagnostic.matched_subject_terms
+    )
+
+
+def test_generic_procedure_without_subject_match_is_rejected() -> None:
+    question = "Как оформить командировку?"
+    plan = _evidence_plan(
+        question,
+        requested_fact_type="procedure",
+        subject="командировка",
+    )
+    decision = EvidenceAssessor().assess(
+        question,
+        [
+            _chunk(
+                802,
+                title="Инструкция согласования договора",
+                section="Согласование договора",
+                text="Создайте договор и запустите обработку.",
+                logical_unit_type="procedure",
+            )
+        ],
+        plan=plan,
+    )
+
+    assert decision.mode == "insufficient_evidence"
+    assert decision.supporting_chunks == ()
+    assert decision.chunk_assessments[0].support_decision == "non_supporting"
+
+
+def test_negative_subject_guard_rejects_other_document_procedures() -> None:
+    question = "Как оформить документ, которого нет в базе?"
+    plan = _evidence_plan(
+        question,
+        requested_fact_type="procedure",
+        subject="документооборот",
+    )
+    chunks = [
+        _chunk(
+            803,
+            title="Инструкция согласования приказов в документообороте",
+            section="Согласование приказов",
+            text="Создайте приказ и запустите согласование.",
+            logical_unit_type="procedure",
+        ),
+        _chunk(
+            804,
+            title="Инструкция согласования договоров в документообороте",
+            section="Согласование договоров",
+            text="Создайте договор и запустите согласование.",
+            logical_unit_type="procedure",
+        ),
+    ]
+
+    decision = EvidenceAssessor().assess(question, chunks, plan=plan)
+
+    assert decision.mode == "insufficient_evidence"
+    assert decision.supporting_chunks == ()
+    assert [
+        chunk.chunk_id for chunk in decision.non_supporting_chunks
+    ] == [803, 804]
+    assert all(
+        diagnostic.negative_subject_guard
+        for diagnostic in decision.chunk_assessments
+    )
+
+
+def test_compound_responsibility_has_partial_identity_coverage() -> None:
+    question = "Кто отвечает за рабочие места и оборудование?"
+    plan = _evidence_plan(
+        question,
+        requested_fact_type="responsible_person",
+        subject="отдел рабочих мест и оборудования",
+    )
+    chunks = [
+        _chunk(
+            805,
+            title="Петров Алексей",
+            section="Справочник сотрудников",
+            text=(
+                "Петров Алексей отвечает за системное администрирование "
+                "и рабочие места."
+            ),
+            entity_type="employee",
+            record_key="employee:petrov_aleksey",
+            doc_type="employee_role",
+        )
+    ]
+
+    decision = EvidenceAssessor().assess(question, chunks, plan=plan)
+
+    assert decision.mode == "partial_answer"
+    assert decision.supported_requirements == ("responsible_identity",)
+    assert decision.unsupported_requirements == (
+        "complete_responsibility_scope",
+    )
+    assert [chunk.chunk_id for chunk in decision.supporting_chunks] == [805]
+    diagnostic = decision.chunk_assessments[0]
+    assert diagnostic.requirement_ids == ("responsible_identity",)
+    assert any(
+        term.startswith("оборудов")
+        for term in diagnostic.rejected_subject_terms
+    )
+
+
 def test_evidence_diagnostics_are_json_serializable_facts() -> None:
     question = "Кому подавать заявление на командировку?"
     plan = _evidence_plan(
@@ -239,6 +371,10 @@ def test_evidence_diagnostics_are_json_serializable_facts() -> None:
     assert requirement["rejection_reasons"] == [
         "named_initial_recipient_not_found"
     ]
+    chunk = diagnostic["chunk_assessments"][0]
+    assert chunk["support_decision"] == "supporting"
+    assert chunk["requirement_ids"] == ["related_submission_procedure"]
+    assert chunk["negative_subject_guard"] is False
 
 
 def _evidence_plan(
@@ -289,10 +425,11 @@ def _chunk(
     sibling: bool = False,
     entity_type: str | None = None,
     record_key: str | None = None,
+    doc_type: str = "test",
 ) -> RetrievedChunk:
     metadata: dict[str, object] = {
         "logical_unit_title": section,
-        "doc_type": "test",
+        "doc_type": doc_type,
     }
     if logical_unit_type:
         metadata["logical_unit_type"] = logical_unit_type
@@ -312,7 +449,7 @@ def _chunk(
         text=text,
         score=100.0,
         metadata=metadata,
-        doc_type="test",
+        doc_type=doc_type,
         base_score=100.0,
         rerank_score=100.0,
         final_score=100.0,

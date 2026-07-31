@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
@@ -35,6 +35,7 @@ _GENERIC_SUBJECT_TERMS = frozenset(
         "действует",
         "действуют",
         "для",
+        "формирование",
         "заявление",
         "как",
         "кто",
@@ -116,6 +117,28 @@ _SUBJECT_CONCEPTS: tuple[
     ),
 )
 
+_NEGATIVE_SUBJECT_PATTERNS = (
+    re.compile(
+        r"\b(?:котор\w+\s+)?нет\s+в\s+"
+        r"(?:баз\w*|материал\w*|источник\w*)\b"
+    ),
+    re.compile(
+        r"\b(?:отсутств\w*|не\s+существ\w*|не\s+найден\w*)\b"
+    ),
+)
+
+_RESPONSIBILITY_PAYLOAD_PATTERNS = (
+    re.compile(r"\bкто\s+отвечает\s+за\s+(?P<subject>.+)$"),
+    re.compile(r"\bкто\s+занимается\s+(?P<subject>.+)$"),
+    re.compile(r"\bкто\s+ведет\s+(?P<subject>.+)$"),
+    re.compile(r"\bкто\s+руководит\s+(?P<subject>.+)$"),
+    re.compile(r"\bкто\s+главный\s+по\s+(?P<subject>.+)$"),
+    re.compile(
+        r"\bк\s+кому\s+(?:обратиться|обращаться)\s+по\s+"
+        r"(?P<subject>.+)$"
+    ),
+)
+
 
 @dataclass(frozen=True)
 class EvidenceRequirement:
@@ -126,6 +149,7 @@ class EvidenceRequirement:
     description: str
     required: bool = True
     expected_coverage_key: str | None = None
+    subject_criteria: tuple[str, ...] = ()
     supported: bool = False
     supporting_chunk_ids: tuple[int | str, ...] = ()
     assessment_reasons: tuple[str, ...] = ()
@@ -138,10 +162,41 @@ class EvidenceRequirement:
             "description": self.description,
             "required": self.required,
             "expected_coverage_key": self.expected_coverage_key,
+            "subject_criteria": list(self.subject_criteria),
             "supported": self.supported,
             "supporting_chunk_ids": list(self.supporting_chunk_ids),
             "assessment_reasons": list(self.assessment_reasons),
             "rejection_reasons": list(self.rejection_reasons),
+        }
+
+
+@dataclass(frozen=True)
+class ChunkEvidenceAssessment:
+    """Structured, reproducible reasons for one selected-context chunk."""
+
+    chunk_id: int | str
+    subject_match_source: tuple[str, ...]
+    matched_subject_terms: tuple[str, ...]
+    rejected_subject_terms: tuple[str, ...]
+    logical_unit_match: bool
+    structured_metadata_match: bool
+    negative_subject_guard: bool
+    requirement_ids: tuple[str, ...]
+    support_decision: str
+    decision_reasons: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "chunk_id": self.chunk_id,
+            "subject_match_source": list(self.subject_match_source),
+            "matched_subject_terms": list(self.matched_subject_terms),
+            "rejected_subject_terms": list(self.rejected_subject_terms),
+            "logical_unit_match": self.logical_unit_match,
+            "structured_metadata_match": self.structured_metadata_match,
+            "negative_subject_guard": self.negative_subject_guard,
+            "requirement_ids": list(self.requirement_ids),
+            "support_decision": self.support_decision,
+            "decision_reasons": list(self.decision_reasons),
         }
 
 
@@ -184,6 +239,7 @@ class EvidenceDecision:
     supporting_chunks: tuple[RetrievedChunk, ...]
     non_supporting_chunks: tuple[RetrievedChunk, ...]
     decision_reasons: tuple[str, ...]
+    chunk_assessments: tuple[ChunkEvidenceAssessment, ...] = ()
 
     def __post_init__(self) -> None:
         if self.mode not in EVIDENCE_MODES:
@@ -224,7 +280,31 @@ class EvidenceDecision:
             ),
             "decision_reasons": list(self.decision_reasons),
             "coverage_rate": self.coverage_rate,
+            "chunk_assessments": [
+                assessment.to_dict()
+                for assessment in self.chunk_assessments
+            ],
         }
+
+
+@dataclass(frozen=True)
+class _SubjectMatch:
+    matched: bool
+    sources: tuple[str, ...] = ()
+    matched_terms: tuple[str, ...] = ()
+    rejected_terms: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _RequirementChunkAssessment:
+    supported: bool
+    subject_match: _SubjectMatch = field(
+        default_factory=lambda: _SubjectMatch(matched=False)
+    )
+    logical_unit_match: bool = False
+    structured_metadata_match: bool = False
+    negative_subject_guard: bool = False
+    decision_reasons: tuple[str, ...] = ()
 
 
 class EvidencePlanner:
@@ -307,17 +387,51 @@ class EvidencePlanner:
             requirements = tuple(items)
             allow_partial = len(requirements) > 1
         elif answer_shape == "responsibility":
-            requirements = (
-                EvidenceRequirement(
-                    requirement_id="primary_responsibility",
-                    requirement_type="structured_responsibility",
-                    description=(
-                        "структурированная ответственность по предмету вопроса"
-                    ),
-                    expected_coverage_key="primary_responsibility",
-                ),
+            subject_components = _responsibility_subject_components(
+                question
             )
-            allow_partial = False
+            if len(subject_components) > 1:
+                requirements = (
+                    EvidenceRequirement(
+                        requirement_id="responsible_identity",
+                        requirement_type=(
+                            "structured_responsibility_identity"
+                        ),
+                        description=(
+                            "ответственный сотрудник или роль по "
+                            "подтверждённой части предмета"
+                        ),
+                        required=False,
+                        expected_coverage_key="primary_responsibility",
+                        subject_criteria=subject_components,
+                    ),
+                    EvidenceRequirement(
+                        requirement_id="complete_responsibility_scope",
+                        requirement_type=(
+                            "structured_responsibility_scope"
+                        ),
+                        description=(
+                            "полное подтверждение всех частей предмета "
+                            "ответственности"
+                        ),
+                        expected_coverage_key="responsibility_scope",
+                        subject_criteria=subject_components,
+                    ),
+                )
+                allow_partial = True
+            else:
+                requirements = (
+                    EvidenceRequirement(
+                        requirement_id="primary_responsibility",
+                        requirement_type="structured_responsibility",
+                        description=(
+                            "структурированная ответственность по "
+                            "предмету вопроса"
+                        ),
+                        expected_coverage_key="primary_responsibility",
+                    ),
+                )
+                allow_partial = False
         else:
             requirements = (
                 EvidenceRequirement(
@@ -355,19 +469,68 @@ class EvidenceAssessor:
         subject = str(plan.diagnostics_metadata.get("subject") or "")
         assessed: list[EvidenceRequirement] = []
         supporting_keys: set[str] = set()
+        chunk_diagnostics: dict[str, dict[str, Any]] = {
+            _stable_chunk_key(chunk): {
+                "subject_match_source": [],
+                "matched_subject_terms": [],
+                "rejected_subject_terms": [],
+                "logical_unit_match": False,
+                "structured_metadata_match": False,
+                "negative_subject_guard": False,
+                "requirement_ids": [],
+                "decision_reasons": [],
+            }
+            for chunk in chunks
+        }
 
         for requirement in plan.evidence_requirements:
-            matching = [
-                chunk
-                for chunk in chunks
-                if _supports_requirement(
+            matching: list[RetrievedChunk] = []
+            for chunk in chunks:
+                chunk_assessment = _assess_requirement_support(
                     requirement,
                     chunk,
                     question=question,
                     subject=subject,
                     answer_shape=plan.answer_shape,
                 )
-            ]
+                diagnostic = chunk_diagnostics[_stable_chunk_key(chunk)]
+                _extend_unique(
+                    diagnostic["subject_match_source"],
+                    chunk_assessment.subject_match.sources,
+                )
+                _extend_unique(
+                    diagnostic["matched_subject_terms"],
+                    chunk_assessment.subject_match.matched_terms,
+                )
+                _extend_unique(
+                    diagnostic["rejected_subject_terms"],
+                    chunk_assessment.subject_match.rejected_terms,
+                )
+                diagnostic["logical_unit_match"] = bool(
+                    diagnostic["logical_unit_match"]
+                    or chunk_assessment.logical_unit_match
+                )
+                diagnostic["structured_metadata_match"] = bool(
+                    diagnostic["structured_metadata_match"]
+                    or chunk_assessment.structured_metadata_match
+                )
+                diagnostic["negative_subject_guard"] = bool(
+                    diagnostic["negative_subject_guard"]
+                    or chunk_assessment.negative_subject_guard
+                )
+                _extend_unique(
+                    diagnostic["decision_reasons"],
+                    tuple(
+                        f"{requirement.requirement_id}:{reason}"
+                        for reason in chunk_assessment.decision_reasons
+                    ),
+                )
+                if chunk_assessment.supported:
+                    matching.append(chunk)
+                    _extend_unique(
+                        diagnostic["requirement_ids"],
+                        (requirement.requirement_id,),
+                    )
             if matching:
                 supporting_keys.update(
                     _stable_chunk_key(chunk) for chunk in matching
@@ -419,6 +582,57 @@ class EvidenceAssessor:
             for chunk in chunks
             if _stable_chunk_key(chunk) not in supporting_keys
         )
+        chunk_assessments = tuple(
+            ChunkEvidenceAssessment(
+                chunk_id=_chunk_diagnostic_id(chunk),
+                subject_match_source=tuple(
+                    chunk_diagnostics[_stable_chunk_key(chunk)][
+                        "subject_match_source"
+                    ]
+                ),
+                matched_subject_terms=tuple(
+                    chunk_diagnostics[_stable_chunk_key(chunk)][
+                        "matched_subject_terms"
+                    ]
+                ),
+                rejected_subject_terms=tuple(
+                    chunk_diagnostics[_stable_chunk_key(chunk)][
+                        "rejected_subject_terms"
+                    ]
+                ),
+                logical_unit_match=bool(
+                    chunk_diagnostics[_stable_chunk_key(chunk)][
+                        "logical_unit_match"
+                    ]
+                ),
+                structured_metadata_match=bool(
+                    chunk_diagnostics[_stable_chunk_key(chunk)][
+                        "structured_metadata_match"
+                    ]
+                ),
+                negative_subject_guard=bool(
+                    chunk_diagnostics[_stable_chunk_key(chunk)][
+                        "negative_subject_guard"
+                    ]
+                ),
+                requirement_ids=tuple(
+                    chunk_diagnostics[_stable_chunk_key(chunk)][
+                        "requirement_ids"
+                    ]
+                ),
+                support_decision=(
+                    "supporting"
+                    if _stable_chunk_key(chunk) in supporting_keys
+                    else "non_supporting"
+                ),
+                decision_reasons=tuple(
+                    chunk_diagnostics[_stable_chunk_key(chunk)][
+                        "decision_reasons"
+                    ]
+                ),
+            )
+            for chunk in chunks
+        )
         required = [
             requirement for requirement in assessed if requirement.required
         ]
@@ -454,51 +668,179 @@ class EvidenceAssessor:
             supporting_chunks=supporting_chunks,
             non_supporting_chunks=non_supporting_chunks,
             decision_reasons=decision_reasons,
+            chunk_assessments=chunk_assessments,
         )
 
 
-def _supports_requirement(
+def _assess_requirement_support(
     requirement: EvidenceRequirement,
     chunk: RetrievedChunk,
     *,
     question: str,
     subject: str,
     answer_shape: str,
-) -> bool:
+) -> _RequirementChunkAssessment:
     requirement_type = requirement.requirement_type
+    criteria = requirement.subject_criteria or (subject,)
+
     if requirement_type == "named_recipient":
-        return _is_named_recipient_record(chunk) and _supports_subject(
+        structured_match = _is_named_recipient_record(chunk)
+        subject_match = _match_subjects(
             chunk,
-            subject,
+            criteria,
             strong_only=False,
+            literal=False,
+            match_all=True,
         )
-    if requirement_type == "procedure_context":
-        return _is_procedural(chunk) and _supports_subject(
+        return _requirement_assessment(
+            supported=structured_match and subject_match.matched,
+            subject_match=subject_match,
+            structured_metadata_match=structured_match,
+        )
+
+    if requirement_type in {"procedure_context", "procedure"}:
+        logical_match = _is_procedural(chunk)
+        subject_match = _match_subjects(
             chunk,
-            subject,
+            criteria,
             strong_only=True,
+            literal=False,
+            match_all=True,
         )
-    if requirement_type == "procedure":
-        return _is_procedural(chunk) and _supports_subject(
+        negative_guard = _negative_subject_guard(question, chunk)
+        return _requirement_assessment(
+            supported=(
+                logical_match
+                and subject_match.matched
+                and not negative_guard
+            ),
+            subject_match=subject_match,
+            logical_unit_match=logical_match,
+            structured_metadata_match=bool(subject_match.sources),
+            negative_subject_guard=negative_guard,
+        )
+
+    if requirement_type == "structured_responsibility_identity":
+        structured_match = _is_structured_responsibility(chunk)
+        subject_match = _match_subjects(
             chunk,
-            subject,
-            strong_only=True,
+            criteria,
+            strong_only=False,
+            literal=True,
+            match_all=False,
         )
+        return _requirement_assessment(
+            supported=structured_match and subject_match.matched,
+            subject_match=subject_match,
+            structured_metadata_match=structured_match,
+        )
+
+    if requirement_type == "structured_responsibility_scope":
+        structured_match = _is_structured_responsibility(chunk)
+        subject_match = _match_subjects(
+            chunk,
+            criteria,
+            strong_only=False,
+            literal=True,
+            match_all=True,
+        )
+        return _requirement_assessment(
+            supported=structured_match and subject_match.matched,
+            subject_match=subject_match,
+            structured_metadata_match=structured_match,
+        )
+
     if requirement_type == "deadline":
-        return bool(_DEADLINE_RE.search(_chunk_weak_haystack(chunk)))
-    if requirement_type == "structured_responsibility":
-        return _is_structured_responsibility(chunk) and _supports_subject(
-            chunk,
-            subject,
-            strong_only=False,
+        supported = bool(_DEADLINE_RE.search(_chunk_weak_haystack(chunk)))
+        return _RequirementChunkAssessment(
+            supported=supported,
+            decision_reasons=(
+                "deadline_rule_matched"
+                if supported
+                else "deadline_rule_not_found",
+            ),
         )
+
+    if requirement_type == "structured_responsibility":
+        structured_match = _is_structured_responsibility(chunk)
+        subject_match = _match_subjects(
+            chunk,
+            criteria,
+            strong_only=False,
+            literal=False,
+            match_all=True,
+        )
+        return _requirement_assessment(
+            supported=structured_match and subject_match.matched,
+            subject_match=subject_match,
+            structured_metadata_match=structured_match,
+        )
+
     if requirement_type == "distinct_list_items":
-        return bool(_coverage_key(chunk))
+        supported = bool(_coverage_key(chunk))
+        return _RequirementChunkAssessment(
+            supported=supported,
+            decision_reasons=(
+                "distinct_coverage_key_matched"
+                if supported
+                else "distinct_coverage_key_missing",
+            ),
+        )
+
     if requirement_type == "primary_fact":
-        return True
+        return _RequirementChunkAssessment(
+            supported=True,
+            decision_reasons=("primary_fact_available",),
+        )
+
     if answer_shape in {"comparison", "default", "single_fact"}:
-        return True
-    return _supports_subject(chunk, subject or question, strong_only=False)
+        return _RequirementChunkAssessment(
+            supported=True,
+            decision_reasons=("answer_shape_accepts_primary_fact",),
+        )
+
+    subject_match = _match_subjects(
+        chunk,
+        (subject or question,),
+        strong_only=False,
+        literal=False,
+        match_all=True,
+    )
+    return _requirement_assessment(
+        supported=subject_match.matched,
+        subject_match=subject_match,
+    )
+
+
+def _requirement_assessment(
+    *,
+    supported: bool,
+    subject_match: _SubjectMatch | None = None,
+    logical_unit_match: bool = False,
+    structured_metadata_match: bool = False,
+    negative_subject_guard: bool = False,
+) -> _RequirementChunkAssessment:
+    match = subject_match or _SubjectMatch(matched=False)
+    reasons: list[str] = []
+    if logical_unit_match:
+        reasons.append("logical_unit_matched")
+    if structured_metadata_match:
+        reasons.append("structured_metadata_matched")
+    if match.matched:
+        reasons.append("subject_matched")
+    elif match.rejected_terms:
+        reasons.append("subject_mismatch")
+    if negative_subject_guard:
+        reasons.append("negative_subject_guard")
+    reasons.append("supporting" if supported else "non_supporting")
+    return _RequirementChunkAssessment(
+        supported=supported,
+        subject_match=match,
+        logical_unit_match=logical_unit_match,
+        structured_metadata_match=structured_metadata_match,
+        negative_subject_guard=negative_subject_guard,
+        decision_reasons=tuple(reasons),
+    )
 
 
 def _is_procedural(chunk: RetrievedChunk) -> bool:
@@ -558,22 +900,141 @@ def _is_named_recipient_record(chunk: RetrievedChunk) -> bool:
     )
 
 
-def _supports_subject(
+def _match_subjects(
+    chunk: RetrievedChunk,
+    subjects: Sequence[str],
+    *,
+    strong_only: bool,
+    literal: bool,
+    match_all: bool,
+) -> _SubjectMatch:
+    matches = [
+        _match_subject(
+            chunk,
+            subject,
+            strong_only=strong_only,
+            literal=literal,
+        )
+        for subject in subjects
+        if str(subject or "").strip()
+    ]
+    if not matches:
+        return _SubjectMatch(matched=False)
+
+    matched = (
+        all(item.matched for item in matches)
+        if match_all
+        else any(item.matched for item in matches)
+    )
+    return _SubjectMatch(
+        matched=matched,
+        sources=tuple(
+            _unique_values(
+                value
+                for item in matches
+                for value in item.sources
+            )
+        ),
+        matched_terms=tuple(
+            _unique_values(
+                value
+                for item in matches
+                for value in item.matched_terms
+            )
+        ),
+        rejected_terms=tuple(
+            _unique_values(
+                value
+                for item in matches
+                for value in item.rejected_terms
+            )
+        ),
+    )
+
+
+def _match_subject(
     chunk: RetrievedChunk,
     subject: str,
     *,
     strong_only: bool,
-) -> bool:
-    concept_groups = _subject_concept_groups(subject)
-    if not concept_groups:
-        return True
-    haystack = _chunk_strong_haystack(chunk)
-    if not strong_only:
-        haystack = f"{haystack} {_chunk_weak_haystack(chunk)}"
-    return all(
-        any(_normalize(variant) in haystack for variant in variants)
-        for variants in concept_groups
+    literal: bool,
+) -> _SubjectMatch:
+    concept_groups = (
+        _literal_subject_groups(subject)
+        if literal
+        else _subject_concept_groups(subject)
     )
+    if not concept_groups:
+        return _SubjectMatch(matched=False)
+
+    strong_fields = _chunk_strong_fields(chunk)
+    weak_fields = (
+        {}
+        if strong_only
+        else {
+            "matched_excerpt": chunk.matched_excerpt,
+            "text": chunk.text,
+        }
+    )
+    sources: list[str] = []
+    matched_terms: list[str] = []
+    rejected_terms: list[str] = []
+
+    for variants in concept_groups:
+        matched_variant: str | None = None
+        matched_source: str | None = None
+        for field_name, field_value in strong_fields.items():
+            normalized_value = _normalize(field_value)
+            matched_variant = next(
+                (
+                    _normalize(variant)
+                    for variant in variants
+                    if _normalize(variant) in normalized_value
+                ),
+                None,
+            )
+            if matched_variant:
+                matched_source = field_name
+                break
+        if matched_variant is None:
+            for field_name, field_value in weak_fields.items():
+                normalized_value = _normalize(field_value)
+                matched_variant = next(
+                    (
+                        _normalize(variant)
+                        for variant in variants
+                        if _normalize(variant) in normalized_value
+                    ),
+                    None,
+                )
+                if matched_variant:
+                    matched_source = field_name
+                    break
+        if matched_variant is None:
+            rejected_terms.append(_normalize(variants[0]))
+            continue
+        matched_terms.append(matched_variant)
+        if matched_source:
+            sources.append(matched_source)
+
+    return _SubjectMatch(
+        matched=not rejected_terms,
+        sources=tuple(_unique_values(sources)),
+        matched_terms=tuple(_unique_values(matched_terms)),
+        rejected_terms=tuple(_unique_values(rejected_terms)),
+    )
+
+
+def _literal_subject_groups(subject: str) -> tuple[tuple[str, ...], ...]:
+    normalized = _normalize(subject)
+    groups: list[tuple[str, ...]] = []
+    for token in _TOKEN_RE.findall(normalized):
+        if token in _GENERIC_SUBJECT_TERMS:
+            continue
+        if len(token) < 5 and not any(char.isdigit() for char in token):
+            continue
+        groups.append((_term_root(token),))
+    return tuple(_unique_values(groups))
 
 
 def _subject_concept_groups(subject: str) -> tuple[tuple[str, ...], ...]:
@@ -616,27 +1077,34 @@ def _term_root(token: str) -> str:
 
 
 def _chunk_strong_haystack(chunk: RetrievedChunk) -> str:
-    metadata = chunk.metadata or {}
     return _normalize(
         " ".join(
-            str(value or "")
-            for value in (
-                chunk.title,
-                chunk.source,
-                chunk.section,
-                chunk.doc_type,
-                metadata.get("source_file"),
-                metadata.get("logical_unit_title"),
-                metadata.get("logical_unit_type"),
-                metadata.get("record_key"),
-                metadata.get("topic"),
-                metadata.get("unit_name"),
-                " ".join(
-                    str(tag) for tag in metadata.get("tags", [])
-                ),
-            )
+            str(value or "") for value in _chunk_strong_fields(chunk).values()
         )
     )
+
+
+def _chunk_strong_fields(chunk: RetrievedChunk) -> dict[str, Any]:
+    metadata = chunk.metadata or {}
+    return {
+        "title": chunk.title,
+        "source": chunk.source,
+        "section": chunk.section,
+        "doc_type": chunk.doc_type,
+        "metadata.source_file": metadata.get("source_file"),
+        "metadata.logical_unit_title": metadata.get(
+            "logical_unit_title"
+        ),
+        "metadata.logical_unit_type": metadata.get(
+            "logical_unit_type"
+        ),
+        "metadata.record_key": metadata.get("record_key"),
+        "metadata.topic": metadata.get("topic"),
+        "metadata.unit_name": metadata.get("unit_name"),
+        "metadata.tags": " ".join(
+            str(tag) for tag in metadata.get("tags", [])
+        ),
+    }
 
 
 def _chunk_weak_haystack(chunk: RetrievedChunk) -> str:
@@ -655,6 +1123,60 @@ def _has_sibling_provenance(chunk: RetrievedChunk) -> bool:
     return "retrieval stage sibling_lookup" in (
         chunk.selection_reasons or []
     )
+
+
+def _negative_subject_guard(
+    question: str,
+    chunk: RetrievedChunk,
+) -> bool:
+    normalized_question = _normalize(question)
+    if not any(
+        pattern.search(normalized_question)
+        for pattern in _NEGATIVE_SUBJECT_PATTERNS
+    ):
+        return False
+    chunk_haystack = (
+        f"{_chunk_strong_haystack(chunk)} {_chunk_weak_haystack(chunk)}"
+    )
+    return not any(
+        pattern.search(chunk_haystack)
+        for pattern in _NEGATIVE_SUBJECT_PATTERNS
+    )
+
+
+def _responsibility_subject_components(question: str) -> tuple[str, ...]:
+    normalized = _normalize(question)
+    payload: str | None = None
+    for pattern in _RESPONSIBILITY_PAYLOAD_PATTERNS:
+        match = pattern.search(normalized)
+        if match:
+            payload = match.group("subject")
+            break
+    if not payload:
+        return ()
+    components = [
+        component.strip()
+        for component in re.split(
+            r"\s+(?:и|или)\s+|,\s*",
+            payload,
+        )
+        if component.strip()
+    ]
+    return tuple(_unique_values(components)) if len(components) > 1 else ()
+
+
+def _extend_unique(target: list[Any], values: Sequence[Any]) -> None:
+    for value in values:
+        if value not in target:
+            target.append(value)
+
+
+def _unique_values(values: Iterable[Any]) -> list[Any]:
+    unique: list[Any] = []
+    for value in values:
+        if value not in unique:
+            unique.append(value)
+    return unique
 
 
 def _asks_for_deadline(question: str) -> bool:
@@ -694,6 +1216,12 @@ def _support_reason(requirement_type: str) -> str:
         "structured_responsibility": (
             "structured_responsibility_subject_matched"
         ),
+        "structured_responsibility_identity": (
+            "structured_responsible_identity_matched"
+        ),
+        "structured_responsibility_scope": (
+            "complete_responsibility_scope_matched"
+        ),
     }.get(requirement_type, "subject_matched_evidence")
 
 
@@ -706,6 +1234,12 @@ def _rejection_reason(requirement_type: str) -> str:
         "procedure_context": "related_procedure_not_found",
         "structured_responsibility": (
             "structured_responsibility_not_found"
+        ),
+        "structured_responsibility_identity": (
+            "structured_responsible_identity_not_found"
+        ),
+        "structured_responsibility_scope": (
+            "complete_responsibility_scope_not_found"
         ),
     }.get(requirement_type, "primary_fact_not_found")
 
