@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from linehelper.rag.retriever import RetrievedChunk, build_matched_excerpt
 
@@ -15,9 +16,11 @@ def build_rag_prompt(
     chunks: Sequence[RetrievedChunk],
     *,
     max_context_chars: int = 8000,
+    evidence_decision: Mapping[str, Any] | None = None,
 ) -> str:
     """Build a Russian RAG prompt from a question and retrieved chunks."""
     sources_text = _format_sources(chunks, max_context_chars=max_context_chars)
+    evidence_text = _format_evidence_guidance(evidence_decision)
 
     return "\n".join(
         [
@@ -46,6 +49,8 @@ def build_rag_prompt(
             "Источники:",
             sources_text,
             "",
+            evidence_text,
+            "",
             "Требования к ответу:",
             "1. Дай краткий и понятный ответ.",
             "2. Сначала проверь, что источники относятся к предмету вопроса.",
@@ -56,6 +61,64 @@ def build_rag_prompt(
             "7. Не добавляй список источников: UI покажет источники отдельно.",
         ]
     )
+
+
+def _format_evidence_guidance(
+    evidence_decision: Mapping[str, Any] | None,
+) -> str:
+    if not evidence_decision:
+        return "Оценка доказательности: не передана."
+
+    mode = str(
+        evidence_decision.get("answer_mode")
+        or evidence_decision.get("mode")
+        or "full_answer"
+    )
+    requirements = evidence_decision.get("evidence_requirements")
+    values = (
+        requirements
+        if isinstance(requirements, Sequence)
+        and not isinstance(requirements, (str, bytes))
+        else []
+    )
+    supported = [
+        str(value.get("description") or value.get("requirement_id"))
+        for value in values
+        if isinstance(value, Mapping) and value.get("supported") is True
+    ]
+    unsupported = [
+        str(value.get("description") or value.get("requirement_id"))
+        for value in values
+        if isinstance(value, Mapping) and value.get("supported") is False
+    ]
+
+    lines = [
+        "Оценка доказательности:",
+        f"Режим: {mode}.",
+        "Подтверждено: "
+        + ("; ".join(supported) if supported else "ничего."),
+        "Не подтверждено: "
+        + ("; ".join(unsupported) if unsupported else "нет."),
+        (
+            "Используй только переданные выше evidence-источники; "
+            "не заполняй пробелы предположениями."
+        ),
+    ]
+    if mode == "partial_answer":
+        lines.extend(
+            [
+                (
+                    "Сначала сообщи подтверждённую полезную часть ответа, "
+                    "затем отдельно и кратко укажи, каких сведений нет "
+                    "в найденных материалах."
+                ),
+                (
+                    "Не советуй предполагаемого адресата, сотрудника или "
+                    "действие, если это не подтверждено evidence-источниками."
+                ),
+            ]
+        )
+    return "\n".join(lines)
 
 
 def _format_sources(

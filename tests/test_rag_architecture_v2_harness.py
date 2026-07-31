@@ -855,6 +855,11 @@ def test_live_runner_reads_native_query_plan_v2_diagnostics() -> None:
         "derived_from": "query_plan.operational_lookup",
         "native_decision_exposed": True,
     }
+    assert diagnostic["evidence_decision"]["available"] is True
+    assert diagnostic["answer_mode"] == "full_answer"
+    assert diagnostic["supported_requirements"] == [
+        "primary_responsibility"
+    ]
 
 
 def test_blocked_live_records_do_not_become_unit_failures() -> None:

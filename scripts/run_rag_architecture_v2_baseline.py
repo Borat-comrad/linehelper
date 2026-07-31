@@ -56,10 +56,6 @@ DEFAULT_OUTPUT_DIR = Path("data/test_runs/rag_architecture_v2")
 DEFAULT_RETRIEVAL_LIMIT = 5
 DEFAULT_CANDIDATE_LIMIT = 30
 OBSERVABILITY_GAPS = {
-    "evidence_decision": (
-        "the evidence gate exposes only the resulting response_kind, not subclaim coverage "
-        "or the gate decision"
-    ),
     "unsupported_claims": (
         "the current answer contract does not return claim-to-evidence attribution"
     ),
@@ -302,10 +298,6 @@ def _run_full_case(
             if isinstance(native_candidates, list)
             else retriever.flattened_candidates()
         )
-        selected_context = selected_context_from_sources(
-            result.sources,
-            raw_candidates,
-        )
         query_plan = result.query_plan or unavailable(
             "RagAnswer did not expose QueryPlan diagnostics"
         )
@@ -314,6 +306,26 @@ def _run_full_case(
         )
         context = result.context or unavailable(
             "RagAnswer did not expose context composition diagnostics"
+        )
+        native_selected_context = (
+            context.get("selected_context")
+            if isinstance(context, dict)
+            else None
+        )
+        selected_context = (
+            [
+                dict(item)
+                for item in native_selected_context
+                if isinstance(item, dict)
+            ]
+            if isinstance(native_selected_context, list)
+            else selected_context_from_sources(
+                result.sources,
+                raw_candidates,
+            )
+        )
+        evidence = result.evidence or unavailable(
+            "RagAnswer did not expose evidence diagnostics"
         )
         intent = (
             query_plan.get("intent")
@@ -575,8 +587,35 @@ def _run_full_case(
                 "coverage_satisfied",
             ),
             "context_size": _context_value(context, "context_size"),
-            "evidence_decision": unavailable(
-                OBSERVABILITY_GAPS["evidence_decision"]
+            "evidence_plan": _evidence_value(
+                evidence,
+                "evidence_plan",
+            ),
+            "evidence_requirements": _evidence_value(
+                evidence,
+                "evidence_requirements",
+            ),
+            "evidence_decision": evidence,
+            "answer_mode": _evidence_value(evidence, "answer_mode"),
+            "supporting_chunk_ids": _evidence_value(
+                evidence,
+                "supporting_chunk_ids",
+            ),
+            "non_supporting_chunk_ids": _evidence_value(
+                evidence,
+                "non_supporting_chunk_ids",
+            ),
+            "supported_requirements": _evidence_value(
+                evidence,
+                "supported_requirements",
+            ),
+            "unsupported_requirements": _evidence_value(
+                evidence,
+                "unsupported_requirements",
+            ),
+            "decision_reasons": _evidence_value(
+                evidence,
+                "decision_reasons",
             ),
             "answer": result.answer,
             "sources": [source_to_dict(source) for source in result.sources],
@@ -777,6 +816,30 @@ def _run_retrieval_only_case(
                 "evidence_decision": unavailable(
                     "not executed in retrieval-only mode"
                 ),
+                "evidence_plan": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "evidence_requirements": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "answer_mode": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "supporting_chunk_ids": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "non_supporting_chunk_ids": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "supported_requirements": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "unsupported_requirements": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
+                "decision_reasons": unavailable(
+                    "not executed in retrieval-only mode"
+                ),
                 "answer": unavailable("not executed in retrieval-only mode"),
                 "sources": unavailable("not executed in retrieval-only mode"),
                 "unsupported_claims": unavailable(
@@ -886,7 +949,15 @@ def _empty_diagnostic(
         "coverage_required": marker,
         "coverage_satisfied": marker,
         "context_size": marker,
+        "evidence_plan": marker,
+        "evidence_requirements": marker,
         "evidence_decision": marker,
+        "answer_mode": marker,
+        "supporting_chunk_ids": marker,
+        "non_supporting_chunk_ids": marker,
+        "supported_requirements": marker,
+        "unsupported_requirements": marker,
+        "decision_reasons": marker,
         "answer": marker,
         "sources": marker,
         "unsupported_claims": marker,
@@ -1066,6 +1137,12 @@ def _context_value(context: Any, key: str) -> Any:
     if isinstance(context, dict) and key in context:
         return context[key]
     return unavailable(f"{key} is absent from context diagnostics")
+
+
+def _evidence_value(evidence: Any, key: str) -> Any:
+    if isinstance(evidence, dict) and key in evidence:
+        return evidence[key]
+    return unavailable(f"{key} is absent from evidence diagnostics")
 
 
 def _flatten_stage_queries(retrieval: dict[str, Any]) -> list[str]:

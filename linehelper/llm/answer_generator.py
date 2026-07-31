@@ -26,6 +26,10 @@ from linehelper.rag.context_composer import (
     ContextComposer,
     ContextPlanner,
 )
+from linehelper.rag.evidence_assessor import (
+    EvidenceAssessor,
+    EvidencePlanner,
+)
 from linehelper.rag.retriever import (
     RetrievedChunk,
     RetrievalPlanner,
@@ -294,6 +298,7 @@ class RagAnswer:
     conversation: dict[str, Any] | None = None
     retrieval: dict[str, Any] | None = None
     context: dict[str, Any] | None = None
+    evidence: dict[str, Any] | None = None
 
 
 def rag_answer_history_metadata(result: RagAnswer) -> dict[str, Any]:
@@ -525,7 +530,7 @@ class RagAnswerGenerator:
             ),
         )
         selected_context_chunks = list(context_selection.selected)
-        context_chunks = (
+        context_gate_chunks = (
             selected_context_chunks
             if has_sufficient_context(
                 resolved_question,
@@ -535,16 +540,28 @@ class RagAnswerGenerator:
             else []
         )
         context_diagnostics = context_selection.to_dict(
-            applied_chunks=context_chunks,
+            applied_chunks=context_gate_chunks,
         )
-        sources = [_source_from_chunk(chunk) for chunk in context_chunks]
+        evidence_plan = EvidencePlanner().build(
+            resolved_question,
+            query_plan=query_plan,
+            context_plan=context_plan,
+        )
+        evidence_decision = EvidenceAssessor().assess(
+            resolved_question,
+            context_gate_chunks,
+            plan=evidence_plan,
+        )
+        evidence_diagnostics = evidence_decision.to_dict()
+        evidence_chunks = list(evidence_decision.supporting_chunks)
+        sources = [_source_from_chunk(chunk) for chunk in evidence_chunks]
         diagnostic_candidates = [
             _source_from_chunk(chunk)
             for chunk in chunks
-            if chunk not in context_chunks
+            if chunk not in evidence_chunks
         ]
 
-        if not context_chunks:
+        if evidence_decision.mode == "insufficient_evidence":
             return RagAnswer(
                 question=clean_question,
                 answer=_no_answer_message(intent),
@@ -564,12 +581,14 @@ class RagAnswerGenerator:
                 conversation=conversation_result,
                 retrieval=retrieval_diagnostics,
                 context=context_diagnostics,
+                evidence=evidence_diagnostics,
             )
 
         prompt = build_rag_prompt(
             resolved_question,
-            context_chunks,
+            evidence_chunks,
             max_context_chars=self.context_char_budget,
+            evidence_decision=evidence_diagnostics,
         )
         messages = [
             {"role": "system", "content": SYSTEM_MESSAGE},
@@ -590,7 +609,7 @@ class RagAnswerGenerator:
             answer=answer_text.strip(),
             model=self.llm_client.model,
             sources=sources,
-            chunks_used=len(context_chunks),
+            chunks_used=len(evidence_chunks),
             prompt_length=len(prompt),
             elapsed_seconds=round(time.monotonic() - started_at, 3),
             retrieval_limit=retrieval_limit,
@@ -598,11 +617,17 @@ class RagAnswerGenerator:
             context_limit=self.context_limit,
             context_score_ratio=self.context_score_ratio,
             diagnostic_candidates=diagnostic_candidates,
+            response_kind=(
+                "partial_answer"
+                if evidence_decision.mode == "partial_answer"
+                else "answer"
+            ),
             query_plan=query_plan_diagnostics,
             resolved_question=resolved_question,
             conversation=conversation_result,
             retrieval=retrieval_diagnostics,
             context=context_diagnostics,
+            evidence=evidence_diagnostics,
         )
 
     def _retrieve_comparison_candidates(

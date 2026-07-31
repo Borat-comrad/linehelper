@@ -347,6 +347,28 @@ def _print_chat_result(result: RagAnswer, *, debug: bool) -> None:
             f"{context_size.get('chunks', '-')}/"
             f"{context_size.get('estimated_chars', '-')}"
         )
+        evidence = result.evidence or {}
+        print(f"evidence answer mode: {evidence.get('answer_mode', '-')}")
+        print(
+            "evidence supporting chunks: "
+            f"{_join(evidence.get('supporting_chunk_ids'))}"
+        )
+        print(
+            "evidence non-supporting chunks: "
+            f"{_join(evidence.get('non_supporting_chunk_ids'))}"
+        )
+        print(
+            "evidence supported requirements: "
+            f"{_join(evidence.get('supported_requirements'))}"
+        )
+        print(
+            "evidence unsupported requirements: "
+            f"{_join(evidence.get('unsupported_requirements'))}"
+        )
+        print(
+            "evidence decision reasons: "
+            f"{_join(evidence.get('decision_reasons'))}"
+        )
         print(f"found chunks: {result.chunks_used}")
         print(f"diagnostic chunks: {len(result.diagnostic_candidates)}")
         print(f"elapsed seconds: {result.elapsed_seconds}")
