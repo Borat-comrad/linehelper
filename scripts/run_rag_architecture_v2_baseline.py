@@ -312,6 +312,9 @@ def _run_full_case(
         conversation = result.conversation or unavailable(
             "RagAnswer did not expose conversation diagnostics"
         )
+        context = result.context or unavailable(
+            "RagAnswer did not expose context composition diagnostics"
+        )
         intent = (
             query_plan.get("intent")
             if isinstance(query_plan, dict) and query_plan.get("intent")
@@ -549,6 +552,29 @@ def _run_full_case(
                 "duration_ms",
             ),
             "selected_context": selected_context,
+            "context_plan": _context_value(context, "context_plan"),
+            "context_requirements": _context_value(
+                context,
+                "context_requirements",
+            ),
+            "context_budget": _context_value(context, "context_budget"),
+            "selected_context_reasons": _context_value(
+                context,
+                "selected_context_reasons",
+            ),
+            "excluded_candidate_reasons": _context_value(
+                context,
+                "excluded_candidate_reasons",
+            ),
+            "coverage_required": _context_value(
+                context,
+                "coverage_required",
+            ),
+            "coverage_satisfied": _context_value(
+                context,
+                "coverage_satisfied",
+            ),
+            "context_size": _context_value(context, "context_size"),
             "evidence_decision": unavailable(
                 OBSERVABILITY_GAPS["evidence_decision"]
             ),
@@ -852,6 +878,14 @@ def _empty_diagnostic(
         "best_score_dedupe_checks": marker,
         "retrieval_duration_ms": marker,
         "selected_context": marker,
+        "context_plan": marker,
+        "context_requirements": marker,
+        "context_budget": marker,
+        "selected_context_reasons": marker,
+        "excluded_candidate_reasons": marker,
+        "coverage_required": marker,
+        "coverage_satisfied": marker,
+        "context_size": marker,
         "evidence_decision": marker,
         "answer": marker,
         "sources": marker,
@@ -1026,6 +1060,12 @@ def _retrieval_value(retrieval: Any, key: str) -> Any:
     if isinstance(retrieval, dict) and key in retrieval:
         return retrieval[key]
     return unavailable(f"{key} is absent from retrieval diagnostics")
+
+
+def _context_value(context: Any, key: str) -> Any:
+    if isinstance(context, dict) and key in context:
+        return context[key]
+    return unavailable(f"{key} is absent from context diagnostics")
 
 
 def _flatten_stage_queries(retrieval: dict[str, Any]) -> list[str]:

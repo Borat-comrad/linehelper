@@ -334,6 +334,19 @@ def _print_chat_result(result: RagAnswer, *, debug: bool) -> None:
         )
         print(f"retrieval duplicates: {retrieval.get('duplicate_count', '-')}")
         print(f"retrieval duration ms: {retrieval.get('duration_ms', '-')}")
+        context = result.context or {}
+        context_plan = context.get("context_plan") or {}
+        context_size = context.get("context_size") or {}
+        print(f"context answer shape: {context_plan.get('answer_shape', '-')}")
+        print(
+            "context coverage: "
+            f"{context.get('coverage_satisfied') or '-'}"
+        )
+        print(
+            "context size chunks/chars: "
+            f"{context_size.get('chunks', '-')}/"
+            f"{context_size.get('estimated_chars', '-')}"
+        )
         print(f"found chunks: {result.chunks_used}")
         print(f"diagnostic chunks: {len(result.diagnostic_candidates)}")
         print(f"elapsed seconds: {result.elapsed_seconds}")

@@ -21,6 +21,11 @@ from linehelper.rag.conversation_resolver import (
     conversation_diagnostics,
     pending_clarification_from_plan,
 )
+from linehelper.rag.context_composer import (
+    DEFAULT_CONTEXT_MAX_CHARS,
+    ContextComposer,
+    ContextPlanner,
+)
 from linehelper.rag.retriever import (
     RetrievedChunk,
     RetrievalPlanner,
@@ -288,6 +293,7 @@ class RagAnswer:
     resolved_question: str | None = None
     conversation: dict[str, Any] | None = None
     retrieval: dict[str, Any] | None = None
+    context: dict[str, Any] | None = None
 
 
 def rag_answer_history_metadata(result: RagAnswer) -> dict[str, Any]:
@@ -327,6 +333,7 @@ class RagAnswerGenerator:
         db_path: Path | None = None,
         context_limit: int | None = None,
         context_score_ratio: float | None = None,
+        context_char_budget: int | None = None,
         query_analyzer: QueryAnalyzerClient | None = None,
         conversation_resolver: ConversationResolver | None = None,
     ) -> None:
@@ -346,6 +353,12 @@ class RagAnswerGenerator:
             else _env_float("RAG_CONTEXT_SCORE_RATIO", DEFAULT_CONTEXT_SCORE_RATIO)
         )
         self.context_score_ratio = max(0.0, min(raw_score_ratio, 1.0))
+        self.context_char_budget = max(
+            1,
+            context_char_budget
+            if context_char_budget is not None
+            else _env_int("RAG_CONTEXT_MAX_CHARS", DEFAULT_CONTEXT_MAX_CHARS),
+        )
 
     def answer(
         self,
@@ -487,13 +500,31 @@ class RagAnswerGenerator:
                 key=_chunk_score,
                 reverse=True,
             )
-        selected_context_chunks = select_context_chunks(
+        base_context_chunks = select_context_chunks(
             resolved_question,
             chunks,
             intent=intent,
             max_chunks=self.context_limit,
             score_ratio=self.context_score_ratio,
         )
+        context_plan = ContextPlanner().build(
+            query_plan=query_plan,
+            configured_max_chunks=self.context_limit,
+            max_context_chars=self.context_char_budget,
+            score_ratio=self.context_score_ratio,
+        )
+        context_selection = ContextComposer().compose(
+            resolved_question,
+            chunks,
+            plan=context_plan,
+            base_selection=base_context_chunks,
+            candidate_provenance=(
+                retrieval_diagnostics.get("candidate_provenance", [])
+                if isinstance(retrieval_diagnostics, dict)
+                else []
+            ),
+        )
+        selected_context_chunks = list(context_selection.selected)
         context_chunks = (
             selected_context_chunks
             if has_sufficient_context(
@@ -502,6 +533,9 @@ class RagAnswerGenerator:
                 intent=intent,
             )
             else []
+        )
+        context_diagnostics = context_selection.to_dict(
+            applied_chunks=context_chunks,
         )
         sources = [_source_from_chunk(chunk) for chunk in context_chunks]
         diagnostic_candidates = [
@@ -529,9 +563,14 @@ class RagAnswerGenerator:
                 resolved_question=resolved_question,
                 conversation=conversation_result,
                 retrieval=retrieval_diagnostics,
+                context=context_diagnostics,
             )
 
-        prompt = build_rag_prompt(resolved_question, context_chunks)
+        prompt = build_rag_prompt(
+            resolved_question,
+            context_chunks,
+            max_context_chars=self.context_char_budget,
+        )
         messages = [
             {"role": "system", "content": SYSTEM_MESSAGE},
             {"role": "user", "content": prompt},
@@ -563,6 +602,7 @@ class RagAnswerGenerator:
             resolved_question=resolved_question,
             conversation=conversation_result,
             retrieval=retrieval_diagnostics,
+            context=context_diagnostics,
         )
 
     def _retrieve_comparison_candidates(
