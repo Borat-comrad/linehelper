@@ -9,8 +9,10 @@ import sys
 from importlib import metadata
 from pathlib import Path
 from typing import Sequence
+from uuid import uuid4
 
 from linehelper import __version__
+from linehelper.analytics.interaction_logger import create_interaction_logger
 from linehelper.config import LineHelperConfig, LineHelperConfigError, load_config
 from linehelper.llm.answer_generator import (
     RagAnswer,
@@ -176,31 +178,46 @@ def _command_doctor(config: LineHelperConfig) -> int:
 
 
 def _command_chat(args: argparse.Namespace, config: LineHelperConfig) -> int:
+    interaction_logger = create_interaction_logger(
+        config.analytics,
+        project_root=config.project_root,
+    )
     try:
-        generator = RagAnswerGenerator(db_path=config.db_path)
+        generator = RagAnswerGenerator(
+            db_path=config.db_path,
+            interaction_logger=interaction_logger,
+        )
     except Exception as exc:
+        interaction_logger.close()
         print(f"Не удалось инициализировать RAG: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
-    if args.interactive or args.question is None:
-        return _interactive_chat(generator, debug=bool(args.debug))
-
     try:
-        result = generator.answer(str(args.question))
-    except (ValueError, RagAnswerError) as exc:
-        print(f"Ошибка: {exc}", file=sys.stderr)
-        return 1
-    except Exception as exc:
-        print(f"Не удалось выполнить вопрос: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 1
+        if args.interactive or args.question is None:
+            return _interactive_chat(generator, debug=bool(args.debug))
 
-    _print_chat_result(result, debug=bool(args.debug))
-    return 0
+        try:
+            result = generator.answer(
+                str(args.question),
+                session_id=str(uuid4()),
+            )
+        except (ValueError, RagAnswerError) as exc:
+            print(f"Ошибка: {exc}", file=sys.stderr)
+            return 1
+        except Exception as exc:
+            print(f"Не удалось выполнить вопрос: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
+
+        _print_chat_result(result, debug=bool(args.debug))
+        return 0
+    finally:
+        interaction_logger.close()
 
 
 def _interactive_chat(generator: RagAnswerGenerator, *, debug: bool) -> int:
     """Run one in-memory dialog without persisting it between CLI processes."""
     session = ConversationSession()
+    session_id = str(uuid4())
     print("Интерактивный LineHelper. Команды: /new — новый диалог, /exit — выход.")
     while True:
         try:
@@ -214,10 +231,15 @@ def _interactive_chat(generator: RagAnswerGenerator, *, debug: bool) -> int:
             return 0
         if question.casefold() == "/new":
             session.reset()
+            session_id = str(uuid4())
             print("История текущего диалога очищена.")
             continue
         try:
-            result = generator.answer(question, history=session.messages)
+            result = generator.answer(
+                question,
+                history=session.messages,
+                session_id=session_id,
+            )
         except (ValueError, RagAnswerError) as exc:
             print(f"Ошибка: {exc}", file=sys.stderr)
             continue
@@ -424,6 +446,9 @@ def _print_chat_result(result: RagAnswer, *, debug: bool) -> None:
         print(f"found chunks: {result.chunks_used}")
         print(f"diagnostic chunks: {len(result.diagnostic_candidates)}")
         print(f"elapsed seconds: {result.elapsed_seconds}")
+        print(f"interaction id: {result.interaction_id or '-'}")
+        print(f"analytics logged: {result.analytics_logged}")
+        print(f"analytics error: {result.analytics_error or '-'}")
 
 
 def _command_index(args: argparse.Namespace, config: LineHelperConfig) -> int:

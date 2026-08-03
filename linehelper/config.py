@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from linehelper.analytics.config import AnalyticsConfig
 from linehelper.llm.ollama_client import DEFAULT_BASE_URL, DEFAULT_MODEL
 
 
@@ -28,6 +29,7 @@ class LineHelperConfig:
     runtime_dir: Path
     streamlit_app_path: Path
     organization_source_path: Path
+    analytics: AnalyticsConfig
 
 
 def load_config() -> LineHelperConfig:
@@ -50,6 +52,7 @@ def load_config() -> LineHelperConfig:
         / "data"
         / "raw_docs"
         / "bvr_company_structure_instruction_v2 (2).txt",
+        analytics=AnalyticsConfig.from_env(project_root),
     )
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -50,6 +51,7 @@ DEFAULT_CANDIDATE_LIMIT = 30
 DEFAULT_CONTEXT_LIMIT = 3
 DEFAULT_CONTEXT_SCORE_RATIO = 0.65
 MIN_GENERIC_CONTEXT_SCORE = 35.0
+LOGGER = logging.getLogger(__name__)
 NO_ANSWER_MESSAGE = (
     "В базе знаний Serviceline нет точного ответа на этот вопрос. "
     "Похоже, вопрос не относится к корпоративным регламентам, инструкциям, "
@@ -263,6 +265,19 @@ class QueryAnalyzerClient(Protocol):
         """Return a structured retrieval plan for a user question."""
 
 
+class InteractionLoggerClient(Protocol):
+    last_error: str | None
+
+    def record_answer(
+        self,
+        result: "RagAnswer",
+        *,
+        session_id: str | None = None,
+        user_id: str | None = None,
+    ) -> str | None:
+        """Queue one completed answer for best-effort persistence."""
+
+
 @dataclass(frozen=True)
 class RagSource:
     title: str
@@ -307,6 +322,9 @@ class RagAnswer:
     answer_contract: dict[str, Any] | None = None
     contract_validation: dict[str, Any] | None = None
     final_answer_sections: list[str] | None = None
+    interaction_id: str | None = None
+    analytics_logged: bool = False
+    analytics_error: str | None = None
 
 
 def rag_answer_history_metadata(result: RagAnswer) -> dict[str, Any]:
@@ -349,11 +367,13 @@ class RagAnswerGenerator:
         context_char_budget: int | None = None,
         query_analyzer: QueryAnalyzerClient | None = None,
         conversation_resolver: ConversationResolver | None = None,
+        interaction_logger: InteractionLoggerClient | None = None,
     ) -> None:
         self.retriever = retriever or SemanticRetriever(db_path)
         self.llm_client = llm_client or OllamaClient()
         self.query_analyzer = query_analyzer
         self.conversation_resolver = conversation_resolver or ConversationResolver()
+        self.interaction_logger = interaction_logger
         self.context_limit = max(
             1,
             context_limit
@@ -374,6 +394,31 @@ class RagAnswerGenerator:
         )
 
     def answer(
+        self,
+        question: str,
+        *,
+        history: Sequence[ConversationTurn | Mapping[str, Any]] | None = None,
+        conversation_context: ConversationContext | None = None,
+        retrieval_limit: int = DEFAULT_RETRIEVAL_LIMIT,
+        candidate_limit: int = DEFAULT_CANDIDATE_LIMIT,
+        session_id: str | None = None,
+        user_id: str | None = None,
+    ) -> RagAnswer:
+        """Return the unchanged RAG result after a best-effort logging side effect."""
+        result = self._answer_without_logging(
+            question,
+            history=history,
+            conversation_context=conversation_context,
+            retrieval_limit=retrieval_limit,
+            candidate_limit=candidate_limit,
+        )
+        return self._record_completed_answer(
+            result,
+            session_id=session_id,
+            user_id=user_id,
+        )
+
+    def _answer_without_logging(
         self,
         question: str,
         *,
@@ -661,6 +706,39 @@ class RagAnswerGenerator:
             answer_contract=answer_contract_diagnostics,
             contract_validation=contract_validation.to_dict(),
             final_answer_sections=list(rendered.final_answer_sections),
+        )
+
+    def _record_completed_answer(
+        self,
+        result: RagAnswer,
+        *,
+        session_id: str | None,
+        user_id: str | None,
+    ) -> RagAnswer:
+        logger = self.interaction_logger
+        if logger is None:
+            return result
+        try:
+            interaction_id = logger.record_answer(
+                result,
+                session_id=session_id,
+                user_id=user_id,
+            )
+        except Exception as exc:  # analytics must never alter answer semantics
+            LOGGER.warning(
+                "Interaction analytics side effect failed: %s",
+                type(exc).__name__,
+            )
+            return replace(
+                result,
+                analytics_logged=False,
+                analytics_error=type(exc).__name__,
+            )
+        return replace(
+            result,
+            interaction_id=interaction_id,
+            analytics_logged=interaction_id is not None,
+            analytics_error=(None if interaction_id is not None else logger.last_error),
         )
 
     def _retrieve_comparison_candidates(

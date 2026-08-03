@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 import streamlit as st
 
@@ -18,11 +19,14 @@ from linehelper.llm.answer_generator import (  # noqa: E402
     RagAnswerGenerator,
     rag_answer_history_metadata,
 )
+from linehelper.analytics.interaction_logger import (  # noqa: E402
+    create_interaction_logger,
+)
+from linehelper.analytics.models import InteractionFeedback  # noqa: E402
+from linehelper.config import load_config  # noqa: E402
 from linehelper.ui.components import badge_html, source_card_html  # noqa: E402
 from linehelper.ui.styles import APP_CSS  # noqa: E402
 
-
-DB_PATH = PROJECT_ROOT / "data" / "memory" / "linehelper_memory.db"
 
 WORK_MODES = (
     "Корпоративная справка",
@@ -30,6 +34,15 @@ WORK_MODES = (
     "Поиск в 1С",
     "Диагностика памяти",
 )
+NEGATIVE_FEEDBACK_OPTIONS = {
+    "Ответ неверный": "wrong_answer",
+    "Ответ неполный": "incomplete_answer",
+    "Неверные источники": "wrong_sources",
+    "Не найден нужный документ": "document_not_found",
+    "Вопрос понят неправильно": "question_misunderstood",
+    "Слишком долго": "too_slow",
+    "Другое": "other",
+}
 
 EXAMPLE_QUERIES = (
     "Что такое ЦКП компании?",
@@ -51,16 +64,24 @@ def main() -> None:
     st.set_page_config(page_title="LineHelper", page_icon="LH", layout="wide")
     st.markdown(APP_CSS, unsafe_allow_html=True)
     _init_session_state()
+    config = load_config()
 
     settings = _render_sidebar()
     _render_header()
 
-    if not DB_PATH.exists():
+    if not config.db_path.exists():
         _render_missing_db_error()
         return
 
     if "generator" not in st.session_state:
-        st.session_state.generator = RagAnswerGenerator(db_path=DB_PATH)
+        interaction_logger = create_interaction_logger(
+            config.analytics,
+            project_root=config.project_root,
+        )
+        st.session_state.generator = RagAnswerGenerator(
+            db_path=config.db_path,
+            interaction_logger=interaction_logger,
+        )
 
     quick_question = _render_quick_scenarios()
     _render_chat_history(settings)
@@ -76,6 +97,8 @@ def main() -> None:
 
 def _init_session_state() -> None:
     st.session_state.setdefault("messages", [])
+    st.session_state.setdefault("analytics_session_id", str(uuid4()))
+    st.session_state.setdefault("feedback_saved", {})
 
 
 def _render_sidebar() -> UiSettings:
@@ -114,8 +137,9 @@ def _render_sidebar() -> UiSettings:
         )
 
         st.markdown("### Статус")
-        db_status = "готова" if DB_PATH.exists() else "не найдена"
-        db_class = "lh-status-ok" if DB_PATH.exists() else "lh-status-warn"
+        db_path = load_config().db_path
+        db_status = "готова" if db_path.exists() else "не найдена"
+        db_class = "lh-status-ok" if db_path.exists() else "lh-status-warn"
         st.markdown(
             f"""
 <div class="lh-sidebar-card">
@@ -169,7 +193,7 @@ def _render_quick_scenarios() -> str | None:
     selected_query: str | None = None
     for index, query in enumerate(EXAMPLE_QUERIES):
         with columns[index]:
-            if st.button(query, key=f"quick_query_{index}", use_container_width=True):
+            if st.button(query, key=f"quick_query_{index}", width="stretch"):
                 selected_query = query
     st.markdown(
         '<div class="lh-hint">Можно начать с готового запроса или задать свой вопрос в чате ниже.</div>',
@@ -184,6 +208,7 @@ def _render_chat_history(settings: UiSettings) -> None:
             st.markdown(message["content"])
             if message["role"] == "assistant" and message.get("result"):
                 _render_result_details(message["result"], settings)
+                _render_feedback(message["result"])
 
 
 def _handle_question(question: str, settings: UiSettings) -> None:
@@ -199,6 +224,7 @@ def _handle_question(question: str, settings: UiSettings) -> None:
                     history=history,
                     retrieval_limit=settings.retrieval_limit,
                     candidate_limit=settings.candidate_limit,
+                    session_id=st.session_state.analytics_session_id,
                 )
         except ValueError as exc:
             st.error(str(exc))
@@ -212,6 +238,7 @@ def _handle_question(question: str, settings: UiSettings) -> None:
 
         st.markdown(result.answer)
         _render_result_details(result, settings)
+        _render_feedback(result)
 
     st.session_state.messages.append({"role": "user", "content": question})
     st.session_state.messages.append(_assistant_message(result))
@@ -245,6 +272,83 @@ def _assistant_message(result) -> dict:
 def _reset_conversation_state() -> None:
     """Clear both displayed turns and structured clarification state."""
     st.session_state.messages = []
+    st.session_state.analytics_session_id = str(uuid4())
+    st.session_state.feedback_saved = {}
+
+
+def _render_feedback(result) -> None:
+    """Render native thumbs and a reason form only for logged interactions."""
+    interaction_id = getattr(result, "interaction_id", None)
+    if not interaction_id:
+        return
+    state = st.session_state.feedback_saved
+    feedback_value = st.feedback(
+        "thumbs",
+        key=f"feedback_{interaction_id}",
+    )
+    if feedback_value == 1:
+        if state.get(interaction_id) != "positive":
+            saved = submit_interaction_feedback(
+                st.session_state.generator.interaction_logger,
+                interaction_id=interaction_id,
+                rating="positive",
+            )
+            state[interaction_id] = "positive" if saved else "failed"
+        if state.get(interaction_id) == "positive":
+            st.caption("Спасибо, оценка сохранена.")
+        else:
+            st.warning("Не удалось сохранить оценку. Ответ остаётся доступным.")
+        return
+    if feedback_value != 0:
+        return
+
+    with st.form(f"negative_feedback_{interaction_id}", border=False):
+        reason_label = st.selectbox(
+            "Почему ответ не помог?",
+            list(NEGATIVE_FEEDBACK_OPTIONS),
+        )
+        comment = st.text_area(
+            "Комментарий (необязательно)",
+            max_chars=1000,
+        )
+        submitted = st.form_submit_button("Отправить оценку")
+    if submitted:
+        saved = submit_interaction_feedback(
+            st.session_state.generator.interaction_logger,
+            interaction_id=interaction_id,
+            rating="negative",
+            reason=NEGATIVE_FEEDBACK_OPTIONS[reason_label],
+            comment=comment or None,
+        )
+        state[interaction_id] = "negative" if saved else "failed"
+    if state.get(interaction_id) == "negative":
+        st.caption("Спасибо, оценка и причина сохранены.")
+    elif state.get(interaction_id) == "failed":
+        st.warning("Не удалось сохранить оценку. Ответ остаётся доступным.")
+
+
+def submit_interaction_feedback(
+    logger,
+    *,
+    interaction_id: str,
+    rating: str,
+    reason: str | None = None,
+    comment: str | None = None,
+) -> bool:
+    """Testable UI boundary; storage failure never reruns or hides the answer."""
+    try:
+        return bool(
+            logger.record_feedback(
+                InteractionFeedback(
+                    interaction_id=interaction_id,
+                    rating=rating,
+                    reason=reason,
+                    comment=comment,
+                )
+            )
+        )
+    except Exception:
+        return False
 
 
 def _chat_placeholder(mode: str) -> str:
@@ -287,6 +391,9 @@ def _render_result_details(result, settings: UiSettings) -> None:
                 "context_limit": result.context_limit,
                 "context_score_ratio": result.context_score_ratio,
                 "response_kind": result.response_kind,
+                "interaction_id": result.interaction_id,
+                "analytics_logged": result.analytics_logged,
+                "analytics_error": result.analytics_error,
                 "resolved_question": result.resolved_question,
                 "conversation": result.conversation,
                 "query_plan": result.query_plan,
