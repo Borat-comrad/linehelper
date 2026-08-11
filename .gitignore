@@ -28,6 +28,13 @@ tmp/
 ~$*
 
 data/memory/*.db
+data/catalogs/source/
+data/catalogs/sourse/
+data/catalogs/staging/
+data/catalogs/*.db
+data/catalogs/*.db-wal
+data/catalogs/*.db-shm
+data/catalogs/exports/
 data/semantic_raw/*
 !data/semantic_raw/.gitkeep
 data/raw_docs/*

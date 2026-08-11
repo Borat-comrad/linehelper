@@ -185,6 +185,7 @@ def _command_chat(args: argparse.Namespace, config: LineHelperConfig) -> int:
     try:
         generator = RagAnswerGenerator(
             db_path=config.db_path,
+            catalog_db_path=config.catalog_db_path,
             interaction_logger=interaction_logger,
         )
     except Exception as exc:
@@ -329,6 +330,9 @@ def _print_chat_result(result: RagAnswer, *, debug: bool) -> None:
         print(f"temporal scope: {query_plan.get('temporal_scope') or '-'}")
         print(f"subject: {query_plan.get('subject') or '-'}")
         print(f"operational lookup: {query_plan.get('operational_lookup', False)}")
+        print(f"catalog identifier: {query_plan.get('catalog_identifier') or '-'}")
+        print(f"catalog result count: {query_plan.get('catalog_result_count', '-')}")
+        print(f"catalog status: {query_plan.get('catalog_status') or '-'}")
         print(
             "operational reason: "
             f"{query_plan.get('operational_decision_reason') or '-'}"

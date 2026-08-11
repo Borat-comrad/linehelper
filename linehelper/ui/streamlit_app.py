@@ -80,6 +80,7 @@ def main() -> None:
         )
         st.session_state.generator = RagAnswerGenerator(
             db_path=config.db_path,
+            catalog_db_path=config.catalog_db_path,
             interaction_logger=interaction_logger,
         )
 
@@ -397,6 +398,7 @@ def _render_result_details(result, settings: UiSettings) -> None:
                 "resolved_question": result.resolved_question,
                 "conversation": result.conversation,
                 "query_plan": result.query_plan,
+                "catalog": result.catalog,
             }
         )
         if result.diagnostic_candidates:

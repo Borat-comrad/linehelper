@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from linehelper.catalogs.chat import CatalogChatOutcome, CatalogChatService
 from linehelper.llm.ollama_client import OllamaClient, OllamaError
 from linehelper.rag.answer_contract import (
     AnswerContractBuilder,
@@ -278,6 +279,11 @@ class InteractionLoggerClient(Protocol):
         """Queue one completed answer for best-effort persistence."""
 
 
+class CatalogChatClient(Protocol):
+    def lookup(self, question: str) -> CatalogChatOutcome | None:
+        """Return a deterministic catalog answer, or None for an unrelated query."""
+
+
 @dataclass(frozen=True)
 class RagSource:
     title: str
@@ -322,6 +328,7 @@ class RagAnswer:
     answer_contract: dict[str, Any] | None = None
     contract_validation: dict[str, Any] | None = None
     final_answer_sections: list[str] | None = None
+    catalog: dict[str, Any] | None = None
     interaction_id: str | None = None
     analytics_logged: bool = False
     analytics_error: str | None = None
@@ -362,18 +369,23 @@ class RagAnswerGenerator:
         retriever: SemanticRetriever | None = None,
         llm_client: ChatClient | None = None,
         db_path: Path | None = None,
+        catalog_db_path: Path | None = None,
         context_limit: int | None = None,
         context_score_ratio: float | None = None,
         context_char_budget: int | None = None,
         query_analyzer: QueryAnalyzerClient | None = None,
         conversation_resolver: ConversationResolver | None = None,
         interaction_logger: InteractionLoggerClient | None = None,
+        catalog_chat: CatalogChatClient | None = None,
     ) -> None:
         self.retriever = retriever or SemanticRetriever(db_path)
         self.llm_client = llm_client or OllamaClient()
         self.query_analyzer = query_analyzer
         self.conversation_resolver = conversation_resolver or ConversationResolver()
         self.interaction_logger = interaction_logger
+        self.catalog_chat = catalog_chat or (
+            CatalogChatService(catalog_db_path) if catalog_db_path is not None else None
+        )
         self.context_limit = max(
             1,
             context_limit
@@ -433,6 +445,16 @@ class RagAnswerGenerator:
             raise ValueError("question must not be empty")
 
         started_at = time.monotonic()
+        if self.catalog_chat is not None:
+            catalog_outcome = self.catalog_chat.lookup(clean_question)
+            if catalog_outcome is not None:
+                return self._catalog_answer(
+                    clean_question,
+                    catalog_outcome,
+                    started_at=started_at,
+                    retrieval_limit=retrieval_limit,
+                    candidate_limit=candidate_limit,
+                )
         resolved = self.conversation_resolver.resolve(
             clean_question,
             history=history,
@@ -706,6 +728,73 @@ class RagAnswerGenerator:
             answer_contract=answer_contract_diagnostics,
             contract_validation=contract_validation.to_dict(),
             final_answer_sections=list(rendered.final_answer_sections),
+        )
+
+    def _catalog_answer(
+        self,
+        question: str,
+        outcome: CatalogChatOutcome,
+        *,
+        started_at: float,
+        retrieval_limit: int,
+        candidate_limit: int,
+    ) -> RagAnswer:
+        is_text_search = outcome.route == "catalog_text_search"
+        if is_text_search:
+            response_kind = {
+                "candidates": "catalog_candidates",
+                "no_candidates": "catalog_search_not_found",
+                "clarification": "catalog_search_clarification",
+                "unavailable": "catalog_unavailable",
+            }.get(outcome.status, "catalog_unavailable")
+            intent = "catalog_text_search"
+            requested_fact_type = "catalog_candidates"
+            matched_signals = ["explicit_catalog_text_search"]
+            subject = outcome.search_query
+        else:
+            response_kind = {
+                "found": "catalog_exact",
+                "not_found": "catalog_not_found",
+                "unavailable": "catalog_unavailable",
+            }.get(outcome.status, "catalog_unavailable")
+            intent = "catalog_exact_lookup"
+            requested_fact_type = "part_number"
+            matched_signals = ["explicit_part_number_lookup"]
+            subject = outcome.identifier
+        diagnostics = {
+            "intent": intent,
+            "raw_intent": intent,
+            "requested_fact_type": requested_fact_type,
+            "finalized_requested_fact_type": requested_fact_type,
+            "resolution_status": "deterministic",
+            "matched_signals": matched_signals,
+            "subject": subject,
+            "operational_lookup": False,
+            "catalog_identifier": outcome.identifier,
+            "catalog_query": outcome.search_query,
+            "catalog_route": outcome.route,
+            "catalog_result_count": len(outcome.results),
+            "catalog_status": outcome.status,
+        }
+        return RagAnswer(
+            question=question,
+            answer=outcome.answer,
+            model="catalog-store",
+            sources=[],
+            chunks_used=0,
+            prompt_length=0,
+            elapsed_seconds=round(time.monotonic() - started_at, 3),
+            retrieval_limit=retrieval_limit,
+            candidate_limit=candidate_limit,
+            context_limit=self.context_limit,
+            context_score_ratio=self.context_score_ratio,
+            diagnostic_candidates=[],
+            response_kind=response_kind,
+            query_plan=diagnostics,
+            resolved_question=question,
+            retrieval={"retrieval_stages": [outcome.route]},
+            final_answer_sections=[response_kind],
+            catalog=outcome.to_dict(),
         )
 
     def _record_completed_answer(
