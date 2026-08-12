@@ -45,15 +45,15 @@ def test_candidate_mode_applies_top_five_and_never_claims_exact_match():
     assert not result.answer.startswith("Деталь:")
 
 
-def test_leading_code_fragment_uses_fts_candidate_route():
+def test_legacy_search_client_checks_exact_before_fts_candidate_fallback():
     search = FakeCatalogSearch(text_results=[_result("X44236986", "подшипник")])
 
     result = _generator(CatalogChatService(search=search)).answer(
         "Найди в каталоге X44236"
     )
 
+    assert search.exact_calls == ["X44236"]
     assert search.text_calls == [("X44236", 5)]
-    assert search.exact_calls == []
     assert result.catalog["results"][0]["part_number"] == "X44236986"
 
 

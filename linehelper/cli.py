@@ -186,6 +186,7 @@ def _command_chat(args: argparse.Namespace, config: LineHelperConfig) -> int:
         generator = RagAnswerGenerator(
             db_path=config.db_path,
             catalog_db_path=config.catalog_db_path,
+            catalog_source_root=config.catalog_source_root,
             interaction_logger=interaction_logger,
         )
     except Exception as exc:
@@ -265,8 +266,25 @@ def _print_chat_result(result: RagAnswer, *, debug: bool) -> None:
     print()
     print(f"Ответ: {result.answer}")
     print()
-    print("Источники:")
+    if result.catalog is not None:
+        print("Источники каталога:")
+        if result.catalog_sources:
+            for index, source in enumerate(result.catalog_sources, start=1):
+                document = source.source_filename or "документ не указан"
+                details = [
+                    document,
+                    f"страница спецификации: {source.source_page}",
+                    f"узел: {source.assembly_code}",
+                ]
+                if source.revision:
+                    details.append(f"ревизия: {source.revision}")
+                if source.machine_number:
+                    details.append(f"машина: {source.machine_number}")
+                print(f"{index}. {' | '.join(details)}")
+        else:
+            print("- подтверждённые catalog occurrences отсутствуют")
     if result.sources:
+        print("Источники документов:" if result.catalog is not None else "Источники:")
         for index, source in enumerate(result.sources, start=1):
             details = " | ".join(
                 part
@@ -278,7 +296,8 @@ def _print_chat_result(result: RagAnswer, *, debug: bool) -> None:
                 if part
             )
             print(f"{index}. {details}")
-    else:
+    elif result.catalog is None:
+        print("Источники:")
         print("-")
 
     if debug:
@@ -333,6 +352,42 @@ def _print_chat_result(result: RagAnswer, *, debug: bool) -> None:
         print(f"catalog identifier: {query_plan.get('catalog_identifier') or '-'}")
         print(f"catalog result count: {query_plan.get('catalog_result_count', '-')}")
         print(f"catalog status: {query_plan.get('catalog_status') or '-'}")
+        print(f"catalog match type: {query_plan.get('catalog_match_type') or '-'}")
+        print(f"source route: {query_plan.get('source_route') or '-'}")
+        print(
+            "catalog probe performed: "
+            f"{query_plan.get('catalog_probe_performed', False)}"
+        )
+        print(
+            "catalog probe result count: "
+            f"{query_plan.get('catalog_probe_result_count', 0)}"
+        )
+        print(f"catalog top score: {query_plan.get('catalog_top_score')}")
+        print(
+            "catalog top field coverage: "
+            f"{query_plan.get('catalog_top_field_coverage')}"
+        )
+        print(
+            "catalog coherent results: "
+            f"{query_plan.get('catalog_probe_coherent_results', 0)}"
+        )
+        print(
+            "corporate evidence available: "
+            f"{query_plan.get('corporate_evidence_available', False)}"
+        )
+        print(
+            "catalog requirement status: "
+            f"{query_plan.get('catalog_requirement_status') or '-'}"
+        )
+        print(
+            "corporate requirement status: "
+            f"{query_plan.get('corporate_requirement_status') or '-'}"
+        )
+        print(f"answer mode: {query_plan.get('answer_mode') or '-'}")
+        print(
+            "resolved requirements: "
+            f"{query_plan.get('resolved_requirements') or '-'}"
+        )
         print(
             "operational reason: "
             f"{query_plan.get('operational_decision_reason') or '-'}"

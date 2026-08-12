@@ -24,6 +24,13 @@ from linehelper.analytics.interaction_logger import (  # noqa: E402
 )
 from linehelper.analytics.models import InteractionFeedback  # noqa: E402
 from linehelper.config import load_config  # noqa: E402
+from linehelper.catalogs.models import CatalogSource  # noqa: E402
+from linehelper.catalogs.navigation import (  # noqa: E402
+    CatalogOccurrenceNavigation,
+    CatalogPagePreviewError,
+    CatalogPageTarget,
+    render_catalog_page_png,
+)
 from linehelper.ui.components import badge_html, source_card_html  # noqa: E402
 from linehelper.ui.styles import APP_CSS  # noqa: E402
 
@@ -81,6 +88,7 @@ def main() -> None:
         st.session_state.generator = RagAnswerGenerator(
             db_path=config.db_path,
             catalog_db_path=config.catalog_db_path,
+            catalog_source_root=config.catalog_source_root,
             interaction_logger=interaction_logger,
         )
 
@@ -100,6 +108,7 @@ def _init_session_state() -> None:
     st.session_state.setdefault("messages", [])
     st.session_state.setdefault("analytics_session_id", str(uuid4()))
     st.session_state.setdefault("feedback_saved", {})
+    st.session_state.setdefault("catalog_preview_target", None)
 
 
 def _render_sidebar() -> UiSettings:
@@ -275,6 +284,7 @@ def _reset_conversation_state() -> None:
     st.session_state.messages = []
     st.session_state.analytics_session_id = str(uuid4())
     st.session_state.feedback_saved = {}
+    st.session_state.catalog_preview_target = None
 
 
 def _render_feedback(result) -> None:
@@ -363,18 +373,30 @@ def _chat_placeholder(mode: str) -> str:
 
 
 def _render_result_details(result, settings: UiSettings) -> None:
-    source_count = len(result.sources)
-    with st.expander(f"Источники ответа ({source_count})", expanded=source_count > 0):
-        if result.sources:
-            for index, source in enumerate(result.sources, start=1):
-                st.markdown(
-                    source_card_html(source, index=index),
-                    unsafe_allow_html=True,
-                )
-        elif result.response_kind == "no_answer":
-            st.info("Релевантные источники ответа не найдены.")
-        else:
-            st.info("Источники ответа не использовались.")
+    if result.catalog_sources:
+        _render_catalog_sources(result.catalog_sources)
+
+    if result.catalog_navigation:
+        result_key = result.interaction_id or f"result_{id(result)}"
+        _render_catalog_navigation(result.catalog_navigation, result_key=result_key)
+
+    if _should_render_rag_sources(result):
+        source_count = len(result.sources)
+        source_label = "Источники документов" if result.catalog else "Источники ответа"
+        with st.expander(
+            f"{source_label} ({source_count})",
+            expanded=source_count > 0,
+        ):
+            if result.sources:
+                for index, source in enumerate(result.sources, start=1):
+                    st.markdown(
+                        source_card_html(source, index=index),
+                        unsafe_allow_html=True,
+                    )
+            elif result.response_kind == "no_answer":
+                st.info("Релевантные источники ответа не найдены.")
+            else:
+                st.info("Источники ответа не использовались.")
 
     if not settings.show_technical_details:
         return
@@ -408,6 +430,126 @@ def _render_result_details(result, settings: UiSettings) -> None:
                     source_card_html(source, index=index),
                     unsafe_allow_html=True,
                 )
+
+
+def _should_render_rag_sources(result) -> bool:
+    """Do not present an empty RAG-source counter for catalog-only answers."""
+    return result.catalog is None or bool(result.sources)
+
+
+def _render_catalog_sources(sources: tuple[CatalogSource, ...]) -> None:
+    with st.expander(f"Источники каталога ({len(sources)})", expanded=True):
+        for index, source in enumerate(sources, 1):
+            with st.container(border=True):
+                st.write(
+                    f"{index}. Деталь {source.part_number}; "
+                    f"узел {source.assembly_code}; позиция {source.position}"
+                )
+                if source.source_filename:
+                    st.write(f"Документ: {source.source_filename}")
+                details = [f"Страница спецификации: {source.source_page}"]
+                if source.reference_page is not None:
+                    details.append(f"Связанная страница: {source.reference_page}")
+                if source.revision:
+                    details.append(f"Ревизия: {source.revision}")
+                if source.machine_number:
+                    details.append(f"Машина: {source.machine_number}")
+                st.caption(" · ".join(details))
+
+
+def _render_catalog_navigation(
+    occurrences: tuple[CatalogOccurrenceNavigation, ...],
+    *,
+    result_key: str,
+) -> None:
+    visible = occurrences[:20]
+    selected = st.session_state.get("catalog_preview_target")
+    targets = {
+        target
+        for occurrence in visible
+        for target in (occurrence.source, occurrence.reference)
+        if target is not None
+    }
+    with st.expander(
+        f"Страницы каталога ({len(occurrences)} вхождений)",
+        expanded=selected in targets,
+    ):
+        for index, occurrence in enumerate(visible, 1):
+            with st.container(border=True):
+                st.markdown(
+                    f"**{index}. {occurrence.assembly_code}, позиция "
+                    f"{occurrence.position}**"
+                )
+                st.caption(occurrence.document.source_filename)
+                with st.container(horizontal=True):
+                    _catalog_page_button(
+                        occurrence.source,
+                        "Открыть страницу спецификации",
+                        occurrence_index=index,
+                        result_key=result_key,
+                    )
+                    if occurrence.reference is not None:
+                        _catalog_page_button(
+                            occurrence.reference,
+                            "Открыть связанную страницу",
+                            occurrence_index=index,
+                            result_key=result_key,
+                        )
+                    else:
+                        st.caption("Связанная страница не указана.")
+        if len(occurrences) > len(visible):
+            st.caption(
+                f"Показаны первые {len(visible)} из {len(occurrences)} вхождений."
+            )
+        selected = st.session_state.get("catalog_preview_target")
+        if selected in targets:
+            _render_catalog_page_preview(selected)
+
+
+def _catalog_page_button(
+    target: CatalogPageTarget,
+    label: str,
+    *,
+    occurrence_index: int,
+    result_key: str,
+) -> None:
+    if target.status == "available":
+        st.button(
+            label,
+            icon=":material/menu_book:",
+            key=(
+                f"catalog_page_{result_key}_{target.catalog_id}_{target.page_kind}_"
+                f"{target.page_number}_{occurrence_index}"
+            ),
+            on_click=_select_catalog_preview,
+            args=(target,),
+        )
+    elif target.status == "invalid_page":
+        st.warning(f"Страница {target.page_number} вне диапазона документа.")
+    else:
+        st.warning("Исходный PDF каталога недоступен локально.")
+
+
+def _select_catalog_preview(target: CatalogPageTarget) -> None:
+    st.session_state.catalog_preview_target = target
+
+
+def _render_catalog_page_preview(target: CatalogPageTarget) -> None:
+    try:
+        preview = render_catalog_page_png(target)
+    except CatalogPagePreviewError:
+        st.warning("Не удалось отобразить выбранную страницу каталога.")
+        return
+    kind = (
+        "Страница спецификации"
+        if target.page_kind == "source"
+        else "Связанная страница"
+    )
+    st.image(
+        preview,
+        caption=f"{kind} {target.page_number} — {target.document_name}",
+        width="stretch",
+    )
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ class LineHelperConfig:
     project_root: Path
     db_path: Path
     catalog_db_path: Path
+    catalog_source_root: Path
     model: str
     ollama_url: str
     streamlit_host: str
@@ -41,6 +42,10 @@ def load_config() -> LineHelperConfig:
         "LINEHELPER_CATALOG_DB_PATH",
         project_root / "data" / "catalogs" / "catalog_store.db",
     )
+    catalog_source_root = _env_path(
+        "LINEHELPER_CATALOG_SOURCE_ROOT",
+        project_root / "data" / "catalogs" / "sourse",
+    )
     runtime_dir = _env_path("LINEHELPER_RUNTIME_DIR", project_root / "data" / "runtime")
     streamlit_host = os.getenv("LINEHELPER_STREAMLIT_HOST", DEFAULT_STREAMLIT_HOST)
     streamlit_port = _env_int("LINEHELPER_STREAMLIT_PORT", DEFAULT_STREAMLIT_PORT)
@@ -48,6 +53,7 @@ def load_config() -> LineHelperConfig:
         project_root=project_root,
         db_path=db_path,
         catalog_db_path=catalog_db_path,
+        catalog_source_root=catalog_source_root,
         model=os.getenv("OLLAMA_MODEL", DEFAULT_MODEL),
         ollama_url=os.getenv("OLLAMA_BASE_URL", DEFAULT_BASE_URL).rstrip("/"),
         streamlit_host=streamlit_host,

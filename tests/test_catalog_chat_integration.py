@@ -67,7 +67,7 @@ def test_source_and_reference_pages_remain_distinct():
     item = result.catalog["results"][0]
     assert item["source_page"] == 9
     assert item["reference_page"] == 12
-    assert "Страница BOM: 9" in result.answer
+    assert "Страница спецификации: 9" in result.answer
     assert "Связанная страница: 12" in result.answer
 
 
@@ -79,7 +79,7 @@ def test_null_reference_page_is_not_replaced_with_source_page():
     ).answer("Покажи деталь X56767951")
 
     assert result.catalog["results"][0]["reference_page"] is None
-    assert "Страница BOM: 13" in result.answer
+    assert "Страница спецификации: 13" in result.answer
     assert "Связанная страница" not in result.answer
 
 

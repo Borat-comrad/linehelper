@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from linehelper.catalogs.chat import CatalogChatOutcome, CatalogChatService
+from linehelper.catalogs.models import CatalogProbeDiagnostics, CatalogSource
+from linehelper.catalogs.navigation import CatalogOccurrenceNavigation
 from linehelper.llm.ollama_client import OllamaClient, OllamaError
 from linehelper.rag.answer_contract import (
     AnswerContractBuilder,
@@ -283,6 +285,12 @@ class CatalogChatClient(Protocol):
     def lookup(self, question: str) -> CatalogChatOutcome | None:
         """Return a deterministic catalog answer, or None for an unrelated query."""
 
+    def probe_natural_language(
+        self,
+        question: str,
+    ) -> CatalogProbeDiagnostics:
+        """Return only conservative natural-language catalog matches."""
+
 
 @dataclass(frozen=True)
 class RagSource:
@@ -329,6 +337,8 @@ class RagAnswer:
     contract_validation: dict[str, Any] | None = None
     final_answer_sections: list[str] | None = None
     catalog: dict[str, Any] | None = None
+    catalog_sources: tuple[CatalogSource, ...] = ()
+    catalog_navigation: tuple[CatalogOccurrenceNavigation, ...] = ()
     interaction_id: str | None = None
     analytics_logged: bool = False
     analytics_error: str | None = None
@@ -370,6 +380,7 @@ class RagAnswerGenerator:
         llm_client: ChatClient | None = None,
         db_path: Path | None = None,
         catalog_db_path: Path | None = None,
+        catalog_source_root: Path | None = None,
         context_limit: int | None = None,
         context_score_ratio: float | None = None,
         context_char_budget: int | None = None,
@@ -384,7 +395,12 @@ class RagAnswerGenerator:
         self.conversation_resolver = conversation_resolver or ConversationResolver()
         self.interaction_logger = interaction_logger
         self.catalog_chat = catalog_chat or (
-            CatalogChatService(catalog_db_path) if catalog_db_path is not None else None
+            CatalogChatService(
+                catalog_db_path,
+                source_root=catalog_source_root,
+            )
+            if catalog_db_path is not None
+            else None
         )
         self.context_limit = max(
             1,
@@ -445,6 +461,7 @@ class RagAnswerGenerator:
             raise ValueError("question must not be empty")
 
         started_at = time.monotonic()
+        catalog_probe = None
         if self.catalog_chat is not None:
             catalog_outcome = self.catalog_chat.lookup(clean_question)
             if catalog_outcome is not None:
@@ -455,6 +472,21 @@ class RagAnswerGenerator:
                     retrieval_limit=retrieval_limit,
                     candidate_limit=candidate_limit,
                 )
+            probe = getattr(self.catalog_chat, "probe_natural_language", None)
+            if callable(probe):
+                catalog_probe = probe(clean_question)
+                if (
+                    catalog_probe.outcome is not None
+                    and catalog_probe.source_route == "catalog"
+                ):
+                    return self._catalog_answer(
+                        clean_question,
+                        catalog_probe.outcome,
+                        started_at=started_at,
+                        retrieval_limit=retrieval_limit,
+                        candidate_limit=candidate_limit,
+                        probe=catalog_probe,
+                    )
         resolved = self.conversation_resolver.resolve(
             clean_question,
             history=history,
@@ -492,7 +524,25 @@ class RagAnswerGenerator:
 
         query_analysis = self._analyze_query(resolved_question)
         query_plan = query_analysis.plan
-        query_plan_diagnostics = query_analysis.diagnostics
+        if catalog_probe is not None and query_plan is not None:
+            normalized_subject = str(query_plan.subject or "").strip()
+            if normalized_subject:
+                requirement_subject = _catalog_requirement_subject(
+                    catalog_probe.query,
+                    normalized_subject,
+                )
+                catalog_probe = replace(
+                    catalog_probe,
+                    resolved_requirements=tuple(
+                        replace(requirement, subject=requirement_subject)
+                        for requirement in catalog_probe.resolved_requirements
+                    ),
+                )
+        query_plan_diagnostics = _with_catalog_probe_diagnostics(
+            query_analysis.diagnostics,
+            catalog_probe,
+            corporate_evidence_available=False,
+        )
 
         clarification = _query_plan_clarification(query_plan)
         if clarification is not None:
@@ -628,7 +678,49 @@ class RagAnswerGenerator:
             plan=evidence_plan,
         )
         evidence_diagnostics = evidence_decision.to_dict()
-        evidence_chunks = list(evidence_decision.supporting_chunks)
+        original_supporting_chunks = list(evidence_decision.supporting_chunks)
+        evidence_chunks = list(original_supporting_chunks)
+        domain_consistency = _mixed_catalog_domain_consistency(
+            catalog_probe,
+            evidence_chunks,
+        )
+        if domain_consistency["checked"] and not domain_consistency["passed"]:
+            evidence_chunks = []
+            evidence_diagnostics = {
+                **evidence_diagnostics,
+                "domain_consistency_checked": True,
+                "domain_consistency_passed": False,
+                "domain_consistency_reason": domain_consistency["reason"],
+                "rejected_supporting_chunk_ids": list(
+                    domain_consistency["rejected_chunk_ids"]
+                ),
+                "supporting_chunk_ids": [],
+                "non_supporting_chunk_ids": list(
+                    dict.fromkeys(
+                        [
+                            *evidence_diagnostics.get("non_supporting_chunk_ids", []),
+                            *domain_consistency["rejected_chunk_ids"],
+                        ]
+                    )
+                ),
+            }
+        elif domain_consistency["checked"]:
+            evidence_chunks = list(domain_consistency["accepted_chunks"])
+            evidence_diagnostics = {
+                **evidence_diagnostics,
+                "domain_consistency_checked": True,
+                "domain_consistency_passed": True,
+                "domain_consistency_reason": domain_consistency["reason"],
+                "domain_inconsistent_chunk_ids": list(
+                    domain_consistency["rejected_chunk_ids"]
+                ),
+                "supporting_chunk_ids": [
+                    _chunk_diagnostic_id(chunk) for chunk in evidence_chunks
+                ],
+            }
+        corporate_evidence_rejected = bool(
+            domain_consistency["checked"] and not domain_consistency["passed"]
+        )
         answer_contract = AnswerContractBuilder().build(evidence_decision)
         answer_contract_diagnostics = answer_contract.to_dict()
         sources = [_source_from_chunk(chunk) for chunk in evidence_chunks]
@@ -638,7 +730,25 @@ class RagAnswerGenerator:
             if chunk not in evidence_chunks
         ]
 
-        if evidence_decision.mode == "insufficient_evidence":
+        if evidence_decision.mode == "insufficient_evidence" or corporate_evidence_rejected:
+            if catalog_probe is not None and catalog_probe.outcome is not None:
+                return self._catalog_answer(
+                    clean_question,
+                    catalog_probe.outcome,
+                    started_at=started_at,
+                    retrieval_limit=retrieval_limit,
+                    candidate_limit=candidate_limit,
+                    probe=catalog_probe,
+                    corporate_evidence_available=False,
+                    corporate_diagnostics={
+                        "query_plan": query_plan_diagnostics,
+                        "retrieval": retrieval_diagnostics,
+                        "context": context_diagnostics,
+                        "evidence": evidence_diagnostics,
+                        "answer_contract": answer_contract_diagnostics,
+                        "contract_validation": None,
+                    },
+                )
             contract_validation = AnswerContractValidator().validate(
                 "",
                 answer_contract,
@@ -701,7 +811,58 @@ class RagAnswerGenerator:
             contract_validation,
         )
 
-        return RagAnswer(
+        if (
+            catalog_probe is not None
+            and catalog_probe.outcome is not None
+            and catalog_probe.source_route == "mixed"
+        ):
+            catalog_answer = self._catalog_answer(
+                clean_question,
+                catalog_probe.outcome,
+                started_at=started_at,
+                retrieval_limit=retrieval_limit,
+                candidate_limit=candidate_limit,
+                probe=catalog_probe,
+                corporate_evidence_available=True,
+            )
+            return replace(
+                catalog_answer,
+                answer=(
+                    f"{catalog_answer.answer}\n\n"
+                    f"Корпоративная база знаний:\n{rendered.answer}"
+                ),
+                model=self.llm_client.model,
+                sources=sources,
+                chunks_used=len(evidence_chunks),
+                prompt_length=len(prompt),
+                diagnostic_candidates=diagnostic_candidates,
+                response_kind="mixed_answer",
+                query_plan=_with_catalog_probe_diagnostics(
+                    query_plan_diagnostics,
+                    catalog_probe,
+                    corporate_evidence_available=True,
+                    source_route="mixed",
+                ),
+                resolved_question=resolved_question,
+                conversation=conversation_result,
+                retrieval={
+                    "retrieval_stages": [
+                        catalog_probe.outcome.route,
+                        *(retrieval_diagnostics or {}).get("retrieval_stages", []),
+                    ],
+                    "corporate": retrieval_diagnostics,
+                },
+                context=context_diagnostics,
+                evidence=evidence_diagnostics,
+                answer_contract=answer_contract_diagnostics,
+                contract_validation=contract_validation.to_dict(),
+                final_answer_sections=[
+                    "catalog_candidates",
+                    *rendered.final_answer_sections,
+                ],
+            )
+
+        corporate_answer = RagAnswer(
             question=clean_question,
             answer=rendered.answer,
             model=self.llm_client.model,
@@ -719,7 +880,12 @@ class RagAnswerGenerator:
                 if evidence_decision.mode == "partial_answer"
                 else "answer"
             ),
-            query_plan=query_plan_diagnostics,
+            query_plan=_with_catalog_probe_diagnostics(
+                query_plan_diagnostics,
+                catalog_probe,
+                corporate_evidence_available=True,
+                source_route="corporate",
+            ),
             resolved_question=resolved_question,
             conversation=conversation_result,
             retrieval=retrieval_diagnostics,
@@ -729,6 +895,33 @@ class RagAnswerGenerator:
             contract_validation=contract_validation.to_dict(),
             final_answer_sections=list(rendered.final_answer_sections),
         )
+        if (
+            catalog_probe is not None
+            and catalog_probe.source_route == "mixed"
+            and catalog_probe.outcome is None
+        ):
+            return replace(
+                corporate_answer,
+                answer=(
+                    f"{corporate_answer.answer}\n\n"
+                    "В Catalog Store не найдено подтверждённых сведений "
+                    "о составе или деталях этого объекта."
+                ),
+                response_kind="partial_mixed_answer",
+                query_plan=_with_catalog_probe_diagnostics(
+                    query_plan_diagnostics,
+                    catalog_probe,
+                    corporate_evidence_available=True,
+                    source_route="mixed",
+                    corporate_requirement_status="found",
+                    answer_mode="partial_mixed",
+                ),
+                final_answer_sections=[
+                    *rendered.final_answer_sections,
+                    "catalog_requirement_not_found",
+                ],
+            )
+        return corporate_answer
 
     def _catalog_answer(
         self,
@@ -738,19 +931,55 @@ class RagAnswerGenerator:
         started_at: float,
         retrieval_limit: int,
         candidate_limit: int,
+        probe: CatalogProbeDiagnostics | None = None,
+        corporate_evidence_available: bool = False,
+        corporate_diagnostics: dict[str, Any] | None = None,
     ) -> RagAnswer:
-        is_text_search = outcome.route == "catalog_text_search"
-        if is_text_search:
+        candidate_routes = {
+            "catalog_text_search",
+            "catalog_code_search",
+            "catalog_natural_search",
+        }
+        structured_routes = {
+            "catalog_assembly_exact",
+            "catalog_assembly_contents",
+            "catalog_bom_position",
+            "catalog_part_exact",
+            "catalog_entity_ambiguity",
+        }
+        is_candidate_search = outcome.route in candidate_routes
+        if is_candidate_search:
             response_kind = {
                 "candidates": "catalog_candidates",
                 "no_candidates": "catalog_search_not_found",
                 "clarification": "catalog_search_clarification",
                 "unavailable": "catalog_unavailable",
             }.get(outcome.status, "catalog_unavailable")
-            intent = "catalog_text_search"
+            intent = outcome.route
             requested_fact_type = "catalog_candidates"
-            matched_signals = ["explicit_catalog_text_search"]
+            matched_signals = [
+                "deterministic_part_code_search"
+                if outcome.route == "catalog_code_search"
+                else "explicit_catalog_text_search"
+            ]
             subject = outcome.search_query
+        elif outcome.route in structured_routes:
+            response_kind = {
+                "found": outcome.route,
+                "ambiguous": "catalog_entity_ambiguity",
+                "not_found": "catalog_not_found",
+                "unavailable": "catalog_unavailable",
+            }.get(outcome.status, "catalog_unavailable")
+            intent = outcome.route
+            requested_fact_type = {
+                "catalog_assembly_exact": "catalog_assembly",
+                "catalog_assembly_contents": "catalog_assembly_contents",
+                "catalog_bom_position": "catalog_bom_position",
+                "catalog_part_exact": "part_number",
+                "catalog_entity_ambiguity": "catalog_entity_disambiguation",
+            }[outcome.route]
+            matched_signals = ["explicit_structured_catalog_intent"]
+            subject = outcome.identifier
         else:
             response_kind = {
                 "found": "catalog_exact",
@@ -761,24 +990,89 @@ class RagAnswerGenerator:
             requested_fact_type = "part_number"
             matched_signals = ["explicit_part_number_lookup"]
             subject = outcome.identifier
-        diagnostics = {
-            "intent": intent,
-            "raw_intent": intent,
-            "requested_fact_type": requested_fact_type,
-            "finalized_requested_fact_type": requested_fact_type,
-            "resolution_status": "deterministic",
-            "matched_signals": matched_signals,
-            "subject": subject,
-            "operational_lookup": False,
+        is_mixed_probe = probe is not None and probe.source_route == "mixed"
+        corporate_requirement_status = (
+            "found"
+            if corporate_evidence_available
+            else (
+                "not_found"
+                if is_mixed_probe and corporate_diagnostics is not None
+                else "not_requested"
+            )
+        )
+        answer_mode = (
+            "full_mixed"
+            if is_mixed_probe and corporate_evidence_available
+            else "partial_mixed"
+            if is_mixed_probe and corporate_requirement_status == "not_found"
+            else "catalog"
+        )
+        answer = outcome.answer
+        if answer_mode == "partial_mixed":
+            answer += (
+                "\n\nВ доступной базе документов не найдено подтверждённой "
+                "процедуры обслуживания этого устройства."
+            )
+            response_kind = "partial_mixed_answer"
+
+        corporate_query_plan = (
+            corporate_diagnostics.get("query_plan")
+            if isinstance(corporate_diagnostics, dict)
+            else None
+        )
+        diagnostics = dict(
+            corporate_query_plan if isinstance(corporate_query_plan, dict) else {}
+        )
+        diagnostics.setdefault("intent", intent)
+        diagnostics.setdefault("raw_intent", intent)
+        diagnostics.setdefault("requested_fact_type", requested_fact_type)
+        diagnostics.setdefault("finalized_requested_fact_type", requested_fact_type)
+        diagnostics.setdefault("resolution_status", "deterministic")
+        diagnostics.setdefault("matched_signals", matched_signals)
+        diagnostics.setdefault("subject", subject)
+        diagnostics.setdefault("operational_lookup", False)
+        diagnostics.update({
             "catalog_identifier": outcome.identifier,
             "catalog_query": outcome.search_query,
             "catalog_route": outcome.route,
+            "catalog_match_type": outcome.match_type,
             "catalog_result_count": len(outcome.results),
             "catalog_status": outcome.status,
-        }
+            "source_route": "mixed" if is_mixed_probe else "catalog",
+            "catalog_probe_performed": probe is not None,
+            "catalog_probe_result_count": (
+                probe.result_count if probe is not None else 0
+            ),
+            "catalog_top_score": probe.top_score if probe is not None else None,
+            "catalog_top_field_coverage": (
+                probe.top_field_coverage if probe is not None else None
+            ),
+            "catalog_probe_coherent_results": (
+                probe.coherent_result_count if probe is not None else 0
+            ),
+            "catalog_subject": (
+                probe.catalog_subject if probe is not None else None
+            ),
+            "catalog_entity_terms": (
+                list(probe.catalog_entity_terms) if probe is not None else []
+            ),
+            "catalog_assembly_context": (
+                probe.catalog_assembly_context if probe is not None else None
+            ),
+            "corporate_evidence_available": corporate_evidence_available,
+            "catalog_requirement_status": (
+                "found" if outcome.results or outcome.assemblies else "not_found"
+            ),
+            "corporate_requirement_status": corporate_requirement_status,
+            "resolved_requirements": _resolved_source_requirements(
+                probe,
+                corporate_requirement_status=corporate_requirement_status,
+            ),
+            "answer_mode": answer_mode,
+        })
         return RagAnswer(
             question=question,
-            answer=outcome.answer,
+            answer=answer,
             model="catalog-store",
             sources=[],
             chunks_used=0,
@@ -792,9 +1086,47 @@ class RagAnswerGenerator:
             response_kind=response_kind,
             query_plan=diagnostics,
             resolved_question=question,
-            retrieval={"retrieval_stages": [outcome.route]},
+            retrieval=(
+                {
+                    "retrieval_stages": [
+                        outcome.route,
+                        *(
+                            (
+                                corporate_diagnostics.get("retrieval") or {}
+                            ).get("retrieval_stages", [])
+                            if isinstance(corporate_diagnostics, dict)
+                            else []
+                        ),
+                    ],
+                    "corporate": corporate_diagnostics,
+                }
+                if corporate_diagnostics is not None
+                else {"retrieval_stages": [outcome.route]}
+            ),
+            context=(
+                corporate_diagnostics.get("context")
+                if isinstance(corporate_diagnostics, dict)
+                else None
+            ),
+            evidence=(
+                corporate_diagnostics.get("evidence")
+                if isinstance(corporate_diagnostics, dict)
+                else None
+            ),
+            answer_contract=(
+                corporate_diagnostics.get("answer_contract")
+                if isinstance(corporate_diagnostics, dict)
+                else None
+            ),
+            contract_validation=(
+                corporate_diagnostics.get("contract_validation")
+                if isinstance(corporate_diagnostics, dict)
+                else None
+            ),
             final_answer_sections=[response_kind],
             catalog=outcome.to_dict(),
+            catalog_sources=outcome.catalog_sources,
+            catalog_navigation=outcome.navigation,
         )
 
     def _record_completed_answer(
@@ -2131,6 +2463,204 @@ def _term_prefix(term: str) -> str:
 
 def _normalize_for_match(value: str) -> str:
     return value.lower().replace("ё", "е")
+
+
+def _catalog_requirement_subject(probe_query: str, analyzed_subject: str) -> str:
+    """Use QueryPlan normalization only when it adds no unprobed concepts."""
+    probe_terms = tuple(_term_prefix(term) for term in _tokens(probe_query))
+    analyzed_terms = tuple(_term_prefix(term) for term in _tokens(analyzed_subject))
+    if len(probe_terms) != len(analyzed_terms):
+        return probe_query
+    equivalent = all(
+        probe.startswith(analyzed) or analyzed.startswith(probe)
+        for probe, analyzed in zip(probe_terms, analyzed_terms, strict=True)
+    )
+    return analyzed_subject if equivalent else probe_query
+
+
+def _mixed_catalog_domain_consistency(
+    probe: CatalogProbeDiagnostics | None,
+    chunks: Sequence[RetrievedChunk],
+) -> dict[str, Any]:
+    """Require positive equipment-subject anchors for mixed corporate evidence."""
+    if probe is None or probe.source_route != "mixed" or probe.outcome is None:
+        return {
+            "checked": False,
+            "passed": True,
+            "reason": "not_a_resolved_mixed_catalog_requirement",
+            "rejected_chunk_ids": (),
+            "accepted_chunks": tuple(chunks),
+        }
+    subject = probe.catalog_subject or probe.query
+    anchors = tuple(
+        dict.fromkeys(
+            prefix
+            for token in _tokens(subject)
+            if len(prefix := _term_prefix(token)) >= 5
+            and prefix not in {
+                "верхн",
+                "нижн",
+                "част",
+                "узел",
+                "детал",
+                "устройств",
+            }
+        )
+    )
+    if not chunks:
+        return {
+            "checked": True,
+            "passed": False,
+            "reason": "no_corporate_supporting_evidence",
+            "rejected_chunk_ids": (),
+            "accepted_chunks": (),
+        }
+    if not anchors:
+        return {
+            "checked": True,
+            "passed": False,
+            "reason": "catalog_subject_has_no_specific_domain_anchor",
+            "rejected_chunk_ids": tuple(_chunk_diagnostic_id(chunk) for chunk in chunks),
+            "accepted_chunks": (),
+        }
+    matched = tuple(
+        chunk
+        for chunk in chunks
+        if any(_chunk_has_domain_anchor(chunk, anchor) for anchor in anchors)
+    )
+    if matched:
+        return {
+            "checked": True,
+            "passed": True,
+            "reason": "corporate_evidence_matches_catalog_subject",
+            "rejected_chunk_ids": tuple(
+                _chunk_diagnostic_id(chunk)
+                for chunk in chunks
+                if chunk not in matched
+            ),
+            "accepted_chunks": matched,
+        }
+    return {
+        "checked": True,
+        "passed": False,
+        "reason": "corporate_evidence_lacks_catalog_subject_anchor",
+        "rejected_chunk_ids": tuple(_chunk_diagnostic_id(chunk) for chunk in chunks),
+        "accepted_chunks": (),
+    }
+
+
+def _chunk_has_domain_anchor(chunk: RetrievedChunk, anchor: str) -> bool:
+    metadata = chunk.metadata or {}
+    haystack = _normalize_for_match(
+        " ".join(
+            str(value or "")
+            for value in (
+                chunk.title,
+                chunk.section,
+                metadata.get("logical_unit_title"),
+                chunk.matched_excerpt,
+                chunk.text,
+            )
+        )
+    )
+    tokens = {
+        _normalize_for_match(token)
+        for token in _tokens(haystack)
+        if len(token) >= 5
+    }
+    return any(
+        token.startswith(anchor) and len(token) - len(anchor) <= 5
+        for token in tokens
+    )
+
+
+def _chunk_diagnostic_id(chunk: RetrievedChunk) -> object:
+    return chunk.chunk_id
+
+
+def _with_catalog_probe_diagnostics(
+    diagnostics: dict[str, Any] | None,
+    probe: CatalogProbeDiagnostics | None,
+    *,
+    corporate_evidence_available: bool,
+    source_route: str | None = None,
+    corporate_requirement_status: str | None = None,
+    answer_mode: str | None = None,
+) -> dict[str, Any]:
+    result = dict(diagnostics or {})
+    if probe is None:
+        return result
+    outcome = probe.outcome
+    resolved_source_route = source_route or probe.source_route
+    resolved_corporate_status = corporate_requirement_status or (
+        "found"
+        if corporate_evidence_available
+        else "pending"
+        if resolved_source_route == "mixed"
+        else "not_requested"
+    )
+    has_catalog_requirement = any(
+        requirement.source == "catalog"
+        for requirement in probe.resolved_requirements
+    )
+    catalog_status = (
+        "found"
+        if isinstance(outcome, CatalogChatOutcome) and outcome.results
+        else "not_found"
+        if has_catalog_requirement
+        else "not_requested"
+    )
+    result.update(
+        {
+            "source_route": resolved_source_route,
+            "catalog_probe_performed": probe.performed,
+            "catalog_probe_result_count": probe.result_count,
+            "catalog_result_count": probe.result_count,
+            "catalog_match_type": (
+                outcome.match_type if isinstance(outcome, CatalogChatOutcome) else None
+            ),
+            "catalog_top_score": probe.top_score,
+            "catalog_top_field_coverage": probe.top_field_coverage,
+            "catalog_probe_coherent_results": probe.coherent_result_count,
+            "catalog_subject": probe.catalog_subject,
+            "catalog_entity_terms": list(probe.catalog_entity_terms),
+            "catalog_assembly_context": probe.catalog_assembly_context,
+            "corporate_evidence_available": corporate_evidence_available,
+            "catalog_requirement_status": catalog_status,
+            "corporate_requirement_status": resolved_corporate_status,
+            "resolved_requirements": _resolved_source_requirements(
+                probe,
+                corporate_requirement_status=resolved_corporate_status,
+            ),
+            "answer_mode": answer_mode or (
+                "full_mixed"
+                if resolved_source_route == "mixed"
+                and corporate_evidence_available
+                and catalog_status == "found"
+                else "partial_mixed"
+                if resolved_source_route == "mixed"
+                and (corporate_evidence_available or catalog_status == "found")
+                else resolved_source_route
+            ),
+        }
+    )
+    return result
+
+
+def _resolved_source_requirements(
+    probe: CatalogProbeDiagnostics | None,
+    *,
+    corporate_requirement_status: str,
+) -> list[dict[str, object]]:
+    if probe is None:
+        return []
+    resolved = []
+    for requirement in probe.resolved_requirements:
+        item = requirement.to_dict()
+        if requirement.source == "corporate":
+            item["status"] = corporate_requirement_status
+        resolved.append(item)
+    return resolved
 
 
 def _env_float(name: str, default: float) -> float:
