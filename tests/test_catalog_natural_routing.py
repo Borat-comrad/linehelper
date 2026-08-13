@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from linehelper.catalogs.chat import CatalogChatService
+from linehelper.catalogs.chat import (
+    CatalogChatService,
+    _extract_natural_catalog_query,
+    extract_part_number_lookup,
+    extract_structured_catalog_intent,
+)
 from linehelper.catalogs.models import CatalogPartResult
 from linehelper.llm.answer_generator import RagAnswerGenerator
 from linehelper.rag.query_analyzer import QueryPlan
@@ -140,6 +145,90 @@ def test_natural_subject_and_entity_context_are_extracted_deterministically():
     assert [result.part_number for result in contextual.outcome.results] == [
         "X44235100"
     ]
+
+
+def test_natural_catalog_wrappers_preserve_subject_and_context():
+    for question in (
+        "Подбери вал, который установлен в нижней части укупорщика.",
+        "Подскажите, пожалуйста: вал в нижней части укупорщика есть?",
+        "По нижней части укупорщика: вал там какой стоит?",
+        "а вал который внизу укупорщика можешь найти",
+    ):
+        query = _extract_natural_catalog_query(question)
+
+        assert query is not None
+        assert query.entity_terms == ("вал",)
+        assert query.assembly_context == "нижняя часть укупорщика" or (
+            query.assembly_context == "нижней части укупорщика"
+        )
+        assert query.understanding_pattern == "entity_with_assembly_context"
+
+
+def test_catalog_subject_and_mixed_clauses_remove_only_boilerplate():
+    pure = _extract_natural_catalog_query(
+        "Перечисли комплектующие прижимного устройства."
+    )
+    mixed = _extract_natural_catalog_query(
+        "Перечисли детали нижней части укупорщика; потом проверь инструкцию по их обслуживанию."
+    )
+
+    assert pure is not None
+    assert pure.subject == "прижимное устройство"
+    assert mixed is not None
+    assert mixed.subject == "нижней части укупорщика"
+    assert mixed.catalog_clause == "Перечисли детали нижней части укупорщика"
+    assert mixed.procedure_clause == "проверь инструкцию по их обслуживанию."
+    assert mixed.resolved_referent == "нижней части укупорщика"
+
+    contextual = _extract_natural_catalog_query(
+        "Найди вал в нижней части укупорщика и проверь, есть ли инструкция по его обслуживанию."
+    )
+    assert contextual is not None
+    assert contextual.entity_terms == ("вал",)
+    assert contextual.subject == "вал нижней части укупорщика"
+    assert contextual.assembly_context == "нижней части укупорщика"
+    assert contextual.procedure_clause == "проверь, есть ли инструкция по его обслуживанию."
+
+
+def test_embedded_code_roles_use_existing_code_search_input():
+    assert (
+        extract_part_number_lookup("Покажи варианты деталей с началом кода X44235.")
+        == "X44235"
+    )
+    assert (
+        extract_part_number_lookup(
+            "Поищи деталь, в коде которой встречается 442351."
+        )
+        == "442351"
+    )
+    assert (
+        extract_part_number_lookup(
+            "Поищи, пожалуйста, икс 44235 — начало кода детали."
+        )
+        == "X44235"
+    )
+    assert extract_part_number_lookup("позиция 44") is None
+
+
+def test_natural_structured_wrapper_keeps_deterministic_assembly_priority():
+    intent = extract_structured_catalog_intent(
+        "Мне нужны детали, входящие в узел 20411617."
+    )
+
+    assert intent is not None
+    assert intent.kind == "assembly_contents"
+    assert intent.code == "20411617"
+
+
+def test_corporate_phrases_are_not_intercepted_by_natural_patterns():
+    for question in (
+        "можно ли дать распоряжение устно",
+        "кто отвечает за документооборот",
+        "что такое ЗРС",
+        "какие цели компании Serviceline",
+        "как начать работу в новой должности",
+    ):
+        assert _extract_natural_catalog_query(question) is None
 
 
 def _generator(

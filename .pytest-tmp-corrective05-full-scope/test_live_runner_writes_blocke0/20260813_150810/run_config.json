@@ -1,0 +1,26 @@
+{
+  "created_at": "2026-08-13T15:08:10+03:00",
+  "run_dir": "C:\\Users\\Nikolai Paliy\\work\\projects\\linehelper\\.pytest-tmp-corrective05-full-scope\\test_live_runner_writes_blocke0\\20260813_150810",
+  "fixture": "C:\\Users\\Nikolai Paliy\\work\\projects\\linehelper\\tests\\fixtures\\rag_architecture_v2_cases.json",
+  "db_path": "C:\\Users\\Nikolai Paliy\\work\\projects\\linehelper\\data\\memory\\linehelper_memory.db",
+  "mode": "full_pipeline",
+  "model": "qwen2.5:14b",
+  "analyzer_model": "qwen2.5:3b",
+  "repeat": 1,
+  "case_ids": [
+    "T06"
+  ],
+  "group": null,
+  "python": "3.12.13 (main, Aug  7 2026, 02:26:41) [MSC v.1944 64 bit (AMD64)]",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "git": {
+    "branch": "refactor/rag-architecture-v2",
+    "commit": "f0b3bae981c91f03e9151713cfe944409227bb69",
+    "status_short": "M linehelper/catalogs/chat.py\n M linehelper/catalogs/models.py\n M linehelper/llm/answer_generator.py\n M tests/test_catalog_natural_routing.py\n?? .pytest-tmp-corrective05-catalog/\n?? .pytest-tmp-corrective05-full-scope/\n?? docs/diagnostics/MANAGER_NATURAL_ACCEPTANCE_REPORT.md\n?? docs/diagnostics/MANAGER_NATURAL_ACCEPTANCE_TRIAGE.md\n?? scripts/run_manager_natural_acceptance.py\n?? tests/test_manager_natural_acceptance.py"
+  },
+  "environment": {
+    "OLLAMA_BASE_URL": "",
+    "OLLAMA_MODEL": "",
+    "OLLAMA_ANALYZER_MODEL": ""
+  }
+}

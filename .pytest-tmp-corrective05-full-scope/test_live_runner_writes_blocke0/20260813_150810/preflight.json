@@ -1,0 +1,12 @@
+{
+  "ok": false,
+  "db_exists": true,
+  "retrieval_only": false,
+  "ollama": {
+    "required": true,
+    "ok": false
+  },
+  "errors": [
+    "Ollama unavailable"
+  ]
+}

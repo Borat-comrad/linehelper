@@ -522,19 +522,27 @@ class RagAnswerGenerator:
                 ),
             )
 
-        query_analysis = self._analyze_query(resolved_question)
+        corporate_question = _mixed_corporate_question(
+            resolved_question,
+            catalog_probe,
+        )
+        query_analysis = self._analyze_query(corporate_question)
         query_plan = query_analysis.plan
         if catalog_probe is not None and query_plan is not None:
             normalized_subject = str(query_plan.subject or "").strip()
             if normalized_subject:
-                requirement_subject = _catalog_requirement_subject(
-                    catalog_probe.query,
-                    normalized_subject,
-                )
                 catalog_probe = replace(
                     catalog_probe,
                     resolved_requirements=tuple(
-                        replace(requirement, subject=requirement_subject)
+                        replace(
+                            requirement,
+                            subject=(
+                                catalog_probe.catalog_subject
+                                or catalog_probe.query
+                                if requirement.source == "catalog"
+                                else normalized_subject
+                            ),
+                        )
                         for requirement in catalog_probe.resolved_requirements
                     ),
                 )
@@ -576,9 +584,9 @@ class RagAnswerGenerator:
             resolved,
             pending_after=None,
         )
-        intent = _runtime_query_intent(resolved_question, query_plan)
+        intent = _runtime_query_intent(corporate_question, query_plan)
         retrieval_execution = self._retrieve_with_query_plan(
-            resolved_question,
+            corporate_question,
             original_question=clean_question,
             query_plan=query_plan,
             retrieval_limit=retrieval_limit,
@@ -631,7 +639,7 @@ class RagAnswerGenerator:
                 reverse=True,
             )
         base_context_chunks = select_context_chunks(
-            resolved_question,
+            corporate_question,
             chunks,
             intent=intent,
             max_chunks=self.context_limit,
@@ -644,7 +652,7 @@ class RagAnswerGenerator:
             score_ratio=self.context_score_ratio,
         )
         context_selection = ContextComposer().compose(
-            resolved_question,
+            corporate_question,
             chunks,
             plan=context_plan,
             base_selection=base_context_chunks,
@@ -668,12 +676,12 @@ class RagAnswerGenerator:
             applied_chunks=context_gate_chunks,
         )
         evidence_plan = EvidencePlanner().build(
-            resolved_question,
+            corporate_question,
             query_plan=query_plan,
             context_plan=context_plan,
         )
         evidence_decision = EvidenceAssessor().assess(
-            resolved_question,
+            corporate_question,
             context_gate_chunks,
             plan=evidence_plan,
         )
@@ -786,7 +794,7 @@ class RagAnswerGenerator:
             )
 
         prompt = build_rag_prompt(
-            resolved_question,
+            corporate_question,
             evidence_chunks,
             max_context_chars=self.context_char_budget,
             answer_contract=answer_contract.to_prompt_dict(),
@@ -1058,6 +1066,15 @@ class RagAnswerGenerator:
             ),
             "catalog_assembly_context": (
                 probe.catalog_assembly_context if probe is not None else None
+            ),
+            "catalog_clause": probe.catalog_clause if probe is not None else None,
+            "procedure_clause": probe.procedure_clause if probe is not None else None,
+            "resolved_referent": probe.resolved_referent if probe is not None else None,
+            "understanding_pattern": (
+                probe.understanding_pattern if probe is not None else None
+            ),
+            "normalization_applied": (
+                list(probe.normalization_applied) if probe is not None else []
             ),
             "corporate_evidence_available": corporate_evidence_available,
             "catalog_requirement_status": (
@@ -2478,6 +2495,37 @@ def _catalog_requirement_subject(probe_query: str, analyzed_subject: str) -> str
     return analyzed_subject if equivalent else probe_query
 
 
+def _mixed_corporate_question(
+    original_question: str,
+    probe: CatalogProbeDiagnostics | None,
+) -> str:
+    """Give the existing analyzer only the corporate clause of a mixed query."""
+    if (
+        probe is None
+        or probe.source_route != "mixed"
+        or not probe.procedure_clause
+    ):
+        return original_question
+    clause = probe.procedure_clause.strip()
+    referent = (probe.resolved_referent or "").strip()
+    if not referent:
+        return clause
+    clause = re.sub(
+        r"\b(?:его|ее|её|их)\s+(?P<need>[а-яё]+)",
+        lambda match: f"{match.group('need')} {referent}",
+        clause,
+        flags=re.IGNORECASE,
+    )
+    clause = re.sub(
+        r"\b(?:с\s+ним|с\s+ней|с\s+этой\s+частью|с\s+этим\s+узлом|"
+        r"для\s+этого\s+узла|этого\s+устройства|этой\s+детали)\b",
+        referent,
+        clause,
+        flags=re.IGNORECASE,
+    )
+    return clause
+
+
 def _mixed_catalog_domain_consistency(
     probe: CatalogProbeDiagnostics | None,
     chunks: Sequence[RetrievedChunk],
@@ -2625,6 +2673,11 @@ def _with_catalog_probe_diagnostics(
             "catalog_subject": probe.catalog_subject,
             "catalog_entity_terms": list(probe.catalog_entity_terms),
             "catalog_assembly_context": probe.catalog_assembly_context,
+            "catalog_clause": probe.catalog_clause,
+            "procedure_clause": probe.procedure_clause,
+            "resolved_referent": probe.resolved_referent,
+            "understanding_pattern": probe.understanding_pattern,
+            "normalization_applied": list(probe.normalization_applied),
             "corporate_evidence_available": corporate_evidence_available,
             "catalog_requirement_status": catalog_status,
             "corporate_requirement_status": resolved_corporate_status,

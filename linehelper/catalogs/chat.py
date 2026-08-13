@@ -35,7 +35,12 @@ _NATURAL_CATALOG_STOP_WORDS = frozenset(
     {
         "что", "ты", "знаешь", "про", "найди", "покажи", "какие", "есть",
         "детали", "деталь", "по", "это", "мне", "информация", "информацию",
-        "известно", "все", "всё", "для", "на", "об", "о",
+        "известно", "все", "всё", "для", "на", "об", "о", "перечисли",
+        "комплектующие", "подскажи", "подскажите", "пожалуйста", "можешь",
+        "поищи", "подбери", "варианты", "входит", "входят", "находится",
+        "находятся", "установлен", "установлена", "установлено", "стоит",
+        "проверь", "каталог", "нужны", "входящие", "который", "которая",
+        "которое", "которые", "там", "какой", "какая", "какое",
     }
 )
 _CORPORATE_ROUTE_TERMS = frozenset(
@@ -44,12 +49,14 @@ _CORPORATE_ROUTE_TERMS = frozenset(
         "регламент", "инструкция", "распоряжение", "устно", "письменно",
         "согласование", "договор", "командировка", "отпуск", "зрс", "цкп",
         "компания", "serviceline", "процедура", "правило", "правила",
+        "должность", "должности", "должностей",
     }
 )
 _MIXED_ROUTE_TERMS = frozenset(
     {
         "обслуживание", "обслуживать", "обслужить", "ремонт", "ремонтировать", "замена",
         "заменить", "настройка", "настроить", "процедура", "инструкция",
+        "порядок", "правило", "правила", "калибровка", "калибровки",
     }
 )
 _PROCEDURAL_QUERY_TOKENS = frozenset(
@@ -57,6 +64,7 @@ _PROCEDURAL_QUERY_TOKENS = frozenset(
         "как", "его", "ее", "её", "их", "обслуживать", "обслужить",
         "обслуживание", "ремонтировать", "ремонт", "заменить", "замена",
         "настроить", "настройка", "процедура", "инструкция",
+        "порядок", "правило", "правила", "калибровка", "калибровки",
     }
 )
 _PROCEDURAL_TERM_STEMS = (
@@ -66,6 +74,19 @@ _PROCEDURAL_TERM_STEMS = (
     "настро",
     "процедур",
     "инструкц",
+    "калибров",
+    "правил",
+)
+_NATURAL_CODE_PATTERNS = (
+    re.compile(
+        r"\b(?:с\s+)?начал\w*\s+кода\s+(?P<code>[A-ZА-ЯЁ]?\s*[- ._/]?\s*\d[A-ZА-ЯЁ0-9 ._/-]{3,29})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:в\s+)?код\w*\s+(?:котор\w+\s+)?(?:встречается|содержится|есть)\s+"
+        r"(?P<code>[A-ZА-ЯЁ]?\s*[- ._/]?\s*\d[A-ZА-ЯЁ0-9 ._/-]{3,29})",
+        re.IGNORECASE,
+    ),
 )
 _NATURAL_ENTITY_CONTEXT_PATTERNS = (
     re.compile(
@@ -76,12 +97,43 @@ _NATURAL_ENTITY_CONTEXT_PATTERNS = (
         r"^\s*покажи\s+(?P<entity>.+?)\s+(?:в|для)\s+(?P<context>.+?)\s*[?!.]*$",
         re.IGNORECASE,
     ),
+    re.compile(
+        r"^\s*(?:а\s+)?(?:подбери|найди|покажи)?\s*(?P<entity>.+?),?\s+"
+        r"котор\w*\s+(?:установлен\w*|сто\w*|наход\w*)\s+"
+        r"(?:в|на)\s+(?P<context>.+?)(?:\s+можешь\s+найти)?\s*[?!.]*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:а\s+)?(?P<entity>.+?)\s+котор\w*\s+"
+        r"(?P<context>(?:внизу|снизу|наверху|сверху)\s+.+?)"
+        r"(?:\s+можешь\s+найти)?\s*[?!.]*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:подскажи(?:те)?\s*,?\s*)?(?:пожалуйста\s*[:,]?\s*)?"
+        r"(?P<entity>.+?)\s+(?:в|для|на)\s+(?P<context>.+?)\s+есть\s*[?!.]*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*по\s+(?P<context>.+?)\s*:\s*(?P<entity>.+?)\s+там\s+"
+        r"(?:како\w+\s+)?(?:стоит|находится)\s*[?!.]*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:а\s+)?(?P<entity>.+?)\s+(?:в|для|на)\s+"
+        r"(?P<context>.+?)(?:\s+можешь\s+найти)?\s*[?!.]*$",
+        re.IGNORECASE,
+    ),
 )
 _NATURAL_SUBJECT_PATTERNS = (
     re.compile(
         r"^\s*(?:какие\s+детали\s+входят\s+в|что\s+входит\s+в|найди\s+детали|"
         r"покажи\s+что\s+есть\s+по|что\s+есть\s+по|что\s+стоит\s+в|"
-        r"что\s+ты\s+знаешь\s+про|что\s+известно\s+про)\s+(?P<subject>.+?)\s*[?!.]*$",
+        r"что\s+есть\s+в|что\s+находится\s+в|что\s+установлено\s+в|"
+        r"что\s+ты\s+знаешь\s+про|что\s+известно\s+про|"
+        r"перечисли\s+(?:комплектующ\w*|детал\w*)|"
+        r"покажи\s+(?:состав|комплектующ\w*|детал\w*)|"
+        r"проверь\s+каталог\s+на)\s+(?P<subject>.+?)\s*[?!.]*$",
         re.IGNORECASE,
     ),
 )
@@ -138,6 +190,11 @@ _BOM_POSITION_PATTERNS = (
 _ASSEMBLY_CONTENT_PATTERNS = (
     re.compile(
         rf"^\s*(?:состав\s+узла|что\s+входит\s+в\s+узел|какие\s+детали\s+входят\s+в\s+узел|покажи\s+спецификацию\s+узла)\s*:?[ ]*(?P<code>{_STRUCTURED_CODE})\s*[?!.]*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"^\s*(?:мне\s+)?(?:нужны|покажи)\s+детал\w*\s*,?\s*"
+        rf"(?:входящ\w*\s+)?в\s+узел\s*:?[ ]*(?P<code>{_STRUCTURED_CODE})\s*[?!.]*$",
         re.IGNORECASE,
     ),
 )
@@ -210,6 +267,11 @@ class NaturalCatalogQuery:
     entity_terms: tuple[str, ...] = ()
     assembly_context: str | None = None
     mixed_signal: bool = False
+    catalog_clause: str | None = None
+    procedure_clause: str | None = None
+    resolved_referent: str | None = None
+    understanding_pattern: str | None = None
+    normalization_applied: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -589,6 +651,11 @@ class CatalogChatService:
                 catalog_subject=natural_query.subject,
                 catalog_entity_terms=natural_query.entity_terms,
                 catalog_assembly_context=natural_query.assembly_context,
+                catalog_clause=natural_query.catalog_clause,
+                procedure_clause=natural_query.procedure_clause,
+                resolved_referent=natural_query.resolved_referent,
+                understanding_pattern=natural_query.understanding_pattern,
+                normalization_applied=natural_query.normalization_applied,
             )
         outcome = CatalogChatOutcome(
             identifier=None,
@@ -617,6 +684,11 @@ class CatalogChatService:
             catalog_subject=natural_query.subject,
             catalog_entity_terms=natural_query.entity_terms,
             catalog_assembly_context=natural_query.assembly_context,
+            catalog_clause=natural_query.catalog_clause,
+            procedure_clause=natural_query.procedure_clause,
+            resolved_referent=natural_query.resolved_referent,
+            understanding_pattern=natural_query.understanding_pattern,
+            normalization_applied=natural_query.normalization_applied,
         )
 
     def _code_lookup(
@@ -826,6 +898,9 @@ def extract_part_number_lookup(question: str) -> str | None:
             if _is_explicit_candidate(candidate):
                 return candidate
             return None
+    embedded = _extract_embedded_part_number(clean)
+    if embedded is not None:
+        return embedded
     candidate = _clean_candidate(clean)
     if not _BARE_CODE.fullmatch(candidate):
         return None
@@ -834,6 +909,28 @@ def extract_part_number_lookup(question: str) -> str | None:
         # Six normalized characters is the guarded substring-search threshold.
         return candidate if len(compact) >= MIN_CODE_SUBSTRING_LENGTH else None
     return candidate if any(char.isdigit() for char in compact) and any(char.isalpha() for char in compact) else None
+
+
+def _extract_embedded_part_number(question: str) -> str | None:
+    """Extract a technical code only when natural wording names its code role."""
+    patterns = (
+        *_NATURAL_CODE_PATTERNS,
+        re.compile(
+            r"\b(?P<code>(?:икс|[A-ZА-ЯЁ])\s*[- ._/]?\s*\d[A-ZА-ЯЁ0-9 ._/-]{3,29})"
+            r"\s*[—-]?\s*(?:начал\w*\s+кода)",
+            re.IGNORECASE,
+        ),
+    )
+    for pattern in patterns:
+        match = pattern.search(question)
+        if match is None:
+            continue
+        candidate = _clean_candidate(match.group("code"))
+        candidate = re.sub(r"^икс\s*[- ._/]?\s*", "X", candidate, flags=re.IGNORECASE)
+        candidate = re.sub(r"\s+", "", candidate)
+        if is_part_number_like(candidate):
+            return candidate
+    return None
 
 
 def extract_catalog_text_search(question: str) -> str | None:
@@ -1203,20 +1300,31 @@ def _extract_natural_catalog_query(question: str) -> NaturalCatalogQuery | None:
     if corporate_signal and (not mixed_signal or not catalog_language_signal):
         return None
 
-    catalog_clause = _catalog_clause(question, mixed_signal=mixed_signal)
+    catalog_clause, procedure_clause = _catalog_clauses(
+        question,
+        mixed_signal=mixed_signal,
+    )
     for pattern in _NATURAL_ENTITY_CONTEXT_PATTERNS:
         match = pattern.fullmatch(catalog_clause)
         if match:
             entity = _clean_natural_phrase(match.group("entity"))
             context = _clean_natural_phrase(match.group("context"))
-            if entity and context:
+            entity_terms = _natural_content_terms(entity)
+            if entity_terms and context:
+                entity = " ".join(entity_terms)
+                context, normalization = _normalize_assembly_context(context)
                 query = f"{entity} {context}"
                 return NaturalCatalogQuery(
                     query=query,
                     subject=query,
-                    entity_terms=_catalog_terms(entity),
+                    entity_terms=entity_terms,
                     assembly_context=context,
                     mixed_signal=mixed_signal,
+                    catalog_clause=catalog_clause,
+                    procedure_clause=procedure_clause,
+                    resolved_referent=(query if procedure_clause else None),
+                    understanding_pattern="entity_with_assembly_context",
+                    normalization_applied=normalization,
                 )
 
     subject = None
@@ -1225,39 +1333,65 @@ def _extract_natural_catalog_query(question: str) -> NaturalCatalogQuery | None:
         if match:
             subject = _clean_natural_phrase(match.group("subject"))
             break
-    subject_tokens = _catalog_terms(subject or catalog_clause)
-    content = [
-        token
-        for token in subject_tokens
-        if token not in _NATURAL_CATALOG_STOP_WORDS
-        and token not in _MIXED_ROUTE_TERMS
-        and token not in _PROCEDURAL_QUERY_TOKENS
-        and not _is_procedural_term(token)
-        and len(token) >= MIN_NATURAL_PROBE_TERM_LENGTH
-    ]
+    raw_subject = subject or catalog_clause
+    normalized_subject, morphology_normalization = _normalize_catalog_phrase(
+        raw_subject
+    )
+    content = list(_natural_content_terms(raw_subject))
     if not MIN_NATURAL_PROBE_TERMS <= len(content) <= MAX_NATURAL_PROBE_TERMS:
         return None
     query = " ".join(content)
+    resolved_subject = " ".join(_natural_content_terms(normalized_subject)) or query
     return NaturalCatalogQuery(
         query=query,
-        subject=query,
+        subject=resolved_subject,
         mixed_signal=mixed_signal,
+        catalog_clause=catalog_clause,
+        procedure_clause=procedure_clause,
+        resolved_referent=(query if procedure_clause else None),
+        understanding_pattern="catalog_subject",
+        normalization_applied=tuple(
+            dict.fromkeys(
+                [
+                    *morphology_normalization,
+                    *(("boilerplate_removed",) if query != catalog_clause.casefold() else ()),
+                ]
+            )
+        ),
     )
 
 
 def _catalog_clause(question: str, *, mixed_signal: bool) -> str:
+    return _catalog_clauses(question, mixed_signal=mixed_signal)[0]
+
+
+def _catalog_clauses(
+    question: str,
+    *,
+    mixed_signal: bool,
+) -> tuple[str, str | None]:
+    """Split one catalog clause from its procedural/corporate continuation."""
     clean = question.strip()
     if not mixed_signal:
-        return clean
-    clauses = re.split(r"\s+и\s+", clean, flags=re.IGNORECASE)
-    for index in range(1, len(clauses)):
-        tail = " и ".join(clauses[index:])
+        return clean, None
+    boundaries = tuple(
+        re.finditer(
+            r"\s*(?:;|,)\s*(?:потом|затем|а\s+затем)?\s*|\s+и\s+",
+            clean,
+            flags=re.IGNORECASE,
+        )
+    )
+    for boundary in boundaries:
+        head = clean[: boundary.start()].strip()
+        tail = clean[boundary.end() :].strip()
         tail_tokens = _catalog_terms(tail)
+        if not head or not tail:
+            continue
         if _contains_procedural_signal(tail_tokens) or (
             "делать" in tail_tokens and "надо" in tail_tokens
         ):
-            return " и ".join(clauses[:index])
-    return clean
+            return head, tail
+    return clean, None
 
 
 def _has_catalog_language_signal(question: str) -> bool:
@@ -1267,6 +1401,16 @@ def _has_catalog_language_signal(question: str) -> bool:
         "найди детали",
         "что входит",
         "что стоит в",
+        "что находится в",
+        "что установлено в",
+        "что есть в",
+        "перечисли комплектующие",
+        "перечисли детали",
+        "подбери вал",
+        "вал в ",
+        "вал для ",
+        "началом кода",
+        "в коде",
         "каталоге",
         "узел",
         "части",
@@ -1277,6 +1421,53 @@ def _has_catalog_language_signal(question: str) -> bool:
 
 def _clean_natural_phrase(value: str) -> str:
     return " ".join(value.strip(" \t\r\n?!.:").split())
+
+
+_CATALOG_WORD_FORMS = {
+    "прижимному": "прижимное",
+    "прижимного": "прижимное",
+    "прижимном": "прижимное",
+    "устройства": "устройство",
+    "устройстве": "устройство",
+    "устройству": "устройство",
+    "узла": "узел",
+    "узле": "узел",
+}
+
+
+def _normalize_catalog_phrase(value: str) -> tuple[str, tuple[str, ...]]:
+    clean = _clean_natural_phrase(value)
+    tokens = clean.split()
+    normalized = [_CATALOG_WORD_FORMS.get(token.casefold(), token) for token in tokens]
+    rendered = " ".join(normalized)
+    return rendered, (("domain_word_forms_normalized",) if rendered != clean else ())
+
+
+def _natural_content_terms(value: str) -> tuple[str, ...]:
+    return tuple(
+        token
+        for token in _catalog_terms(value)
+        if token not in _NATURAL_CATALOG_STOP_WORDS
+        and token not in _MIXED_ROUTE_TERMS
+        and token not in _PROCEDURAL_QUERY_TOKENS
+        and not _is_procedural_term(token)
+        and len(token) >= MIN_NATURAL_PROBE_TERM_LENGTH
+    )
+
+
+def _normalize_assembly_context(value: str) -> tuple[str, tuple[str, ...]]:
+    clean, morphology = _normalize_catalog_phrase(value)
+    lower_match = re.fullmatch(r"(?:внизу|снизу)\s+(.+)", clean, re.IGNORECASE)
+    if lower_match:
+        return f"нижняя часть {lower_match.group(1)}", tuple(
+            dict.fromkeys((*morphology, "relative_position_normalized"))
+        )
+    upper_match = re.fullmatch(r"(?:наверху|сверху)\s+(.+)", clean, re.IGNORECASE)
+    if upper_match:
+        return f"верхняя часть {upper_match.group(1)}", tuple(
+            dict.fromkeys((*morphology, "relative_position_normalized"))
+        )
+    return clean, morphology
 
 
 def _contains_procedural_signal(tokens: tuple[str, ...]) -> bool:
@@ -1480,6 +1671,21 @@ def _empty_probe(
         ),
         catalog_assembly_context=(
             natural_query.assembly_context if natural_query is not None else None
+        ),
+        catalog_clause=(
+            natural_query.catalog_clause if natural_query is not None else None
+        ),
+        procedure_clause=(
+            natural_query.procedure_clause if natural_query is not None else None
+        ),
+        resolved_referent=(
+            natural_query.resolved_referent if natural_query is not None else None
+        ),
+        understanding_pattern=(
+            natural_query.understanding_pattern if natural_query is not None else None
+        ),
+        normalization_applied=(
+            natural_query.normalization_applied if natural_query is not None else ()
         ),
     )
 

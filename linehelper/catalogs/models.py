@@ -115,3 +115,8 @@ class CatalogProbeDiagnostics:
     catalog_subject: str | None = None
     catalog_entity_terms: tuple[str, ...] = ()
     catalog_assembly_context: str | None = None
+    catalog_clause: str | None = None
+    procedure_clause: str | None = None
+    resolved_referent: str | None = None
+    understanding_pattern: str | None = None
+    normalization_applied: tuple[str, ...] = ()

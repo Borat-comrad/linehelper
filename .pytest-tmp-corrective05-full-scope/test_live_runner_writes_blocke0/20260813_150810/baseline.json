@@ -1,0 +1,482 @@
+{
+  "schema_version": "2.0",
+  "generated_at": "2026-08-13T15:08:10+03:00",
+  "run_id": "20260813_150810",
+  "config": {
+    "created_at": "2026-08-13T15:08:10+03:00",
+    "run_dir": "C:\\Users\\Nikolai Paliy\\work\\projects\\linehelper\\.pytest-tmp-corrective05-full-scope\\test_live_runner_writes_blocke0\\20260813_150810",
+    "fixture": "C:\\Users\\Nikolai Paliy\\work\\projects\\linehelper\\tests\\fixtures\\rag_architecture_v2_cases.json",
+    "db_path": "C:\\Users\\Nikolai Paliy\\work\\projects\\linehelper\\data\\memory\\linehelper_memory.db",
+    "mode": "full_pipeline",
+    "model": "qwen2.5:14b",
+    "analyzer_model": "qwen2.5:3b",
+    "repeat": 1,
+    "case_ids": [
+      "T06"
+    ],
+    "group": null,
+    "python": "3.12.13 (main, Aug  7 2026, 02:26:41) [MSC v.1944 64 bit (AMD64)]",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "git": {
+      "branch": "refactor/rag-architecture-v2",
+      "commit": "f0b3bae981c91f03e9151713cfe944409227bb69",
+      "status_short": "M linehelper/catalogs/chat.py\n M linehelper/catalogs/models.py\n M linehelper/llm/answer_generator.py\n M tests/test_catalog_natural_routing.py\n?? .pytest-tmp-corrective05-catalog/\n?? .pytest-tmp-corrective05-full-scope/\n?? docs/diagnostics/MANAGER_NATURAL_ACCEPTANCE_REPORT.md\n?? docs/diagnostics/MANAGER_NATURAL_ACCEPTANCE_TRIAGE.md\n?? scripts/run_manager_natural_acceptance.py\n?? tests/test_manager_natural_acceptance.py"
+    },
+    "environment": {
+      "OLLAMA_BASE_URL": "",
+      "OLLAMA_MODEL": "",
+      "OLLAMA_ANALYZER_MODEL": ""
+    }
+  },
+  "preflight": {
+    "ok": false,
+    "db_exists": true,
+    "retrieval_only": false,
+    "ollama": {
+      "required": true,
+      "ok": false
+    },
+    "errors": [
+      "Ollama unavailable"
+    ]
+  },
+  "fixture": {
+    "path": "C:\\Users\\Nikolai Paliy\\work\\projects\\linehelper\\tests\\fixtures\\rag_architecture_v2_cases.json",
+    "schema_version": "2.0",
+    "selected_case_ids": [
+      "T06"
+    ],
+    "selected_count": 1
+  },
+  "metrics": {
+    "total_cases": 1,
+    "total_evaluations": 1,
+    "passed": 0,
+    "failed": 0,
+    "blocked": 1,
+    "not_applicable": 0,
+    "false_clarification_count": "not_available",
+    "missing_clarification_count": "not_available",
+    "valid_clarification_recall": "not_available",
+    "invalid_clarification_rejection_rate": "not_available",
+    "missing_slot_clarification_accuracy": "not_available",
+    "retrieval_started_after_rejected_clarification": "not_available",
+    "operational_misroute_count": "not_available",
+    "missed_operational_count": "not_available",
+    "requested_fact_type_availability": "not_available",
+    "requested_fact_type_accuracy": "not_available",
+    "required_chunk_recall_at_5": "not_available",
+    "required_chunk_recall_at_10": "not_available",
+    "required_candidate_recall_at_5": "not_available",
+    "required_candidate_recall_at_10": "not_available",
+    "required_candidate_recall_by_stage": "not_available",
+    "exact_identifier_recall": "not_available",
+    "subject_function_recall": "not_available",
+    "procedure_recall": "not_available",
+    "organization_function_recall": "not_available",
+    "sibling_recall": "not_available",
+    "candidate_provenance_coverage": "not_available",
+    "duplicate_candidates_before_merge": "not_available",
+    "duplicate_candidates_after_merge": "not_available",
+    "best_score_dedupe_accuracy": "not_available",
+    "candidate_order_stability": {
+      "available": false,
+      "reason": "requires repeated execution; see repeatability artifact"
+    },
+    "retrieval_latency_p50": "not_available",
+    "retrieval_latency_p95": "not_available",
+    "required_chunk_in_context_rate": "not_available",
+    "evidence_coverage_rate": "not_available",
+    "unsupported_person_answer_count": "not_available",
+    "generic_no_answer_when_evidence_exists": "not_available",
+    "multi_turn_resolution_rate": "not_available",
+    "resolved_question_available_rate": {
+      "available": 0,
+      "total": 1,
+      "rate": 0.0
+    },
+    "resolved_question_accuracy": "not_available",
+    "topic_change_accuracy": "not_available",
+    "slot_inheritance_accuracy": "not_available",
+    "stale_context_leak_count": "not_available",
+    "history_used_when_required": "not_available",
+    "history_used_when_not_required": "not_available",
+    "repeated_clarification_after_resolution": "not_available",
+    "T01_T09_pass_rate": {
+      "cases": 1,
+      "passed": 0,
+      "failed": 0,
+      "blocked": 1,
+      "not_applicable": 0,
+      "rate": "not_available"
+    },
+    "paired_intent_pass_rate": "not_available",
+    "paired_responsibility_status_pass_rate": "not_available",
+    "conversation_cases": "not_available",
+    "conversation_cases_total": "not_available",
+    "conversation_cases_passed": "not_available",
+    "responsibility_cases": {
+      "cases": 1,
+      "passed": 0,
+      "failed": 0,
+      "blocked": 1,
+      "not_applicable": 0,
+      "rate": "not_available"
+    },
+    "procedure_cases": "not_available",
+    "operational_boundary_cases": "not_available",
+    "clarification_cases": "not_available"
+  },
+  "repeatability": {
+    "available": false,
+    "reason": "no repeated cases in this run"
+  },
+  "observability_gaps": {
+    "unsupported_claims": "the current answer contract does not return claim-to-evidence attribution"
+  },
+  "cases": [
+    {
+      "case_id": "T06",
+      "repeat_index": 1,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Кто отвечает за отгрузку клиенту?"
+        }
+      ],
+      "original_question": "Кто отвечает за отгрузку клиенту?",
+      "resolved_question": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "conversation": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "conversation_history_used": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "conversation_turns_used": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "is_follow_up": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "topic_changed": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "resolution_kind": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "inherited_slots": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "resolution_confidence": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "resolution_reasons": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "pending_clarification_before": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "pending_clarification_after": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "query_plan": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "requested_fact_type": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "raw_requested_fact_type": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "initial_requested_fact_type": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "finalized_requested_fact_type": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "fact_type_resolution": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "fact_type_resolution_status": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "fact_type_matched_signals": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "rejected_fact_types": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "fact_type_decision_reasons": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "temporal_scope": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "raw_temporal_scope": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "subject": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "raw_subject": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "raw_intent": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "intent": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "clarification": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "operational_boundary": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "retrieval_plan": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "retrieval_stages": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "stage_queries": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "stage_filters": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "stage_hit_counts": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "retrieval_queries": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "raw_candidates": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "merged_candidates": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "candidate_count_before_dedupe": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "candidate_count_after_dedupe": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "duplicate_count": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "candidate_provenance": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "candidate_stage_hits": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "candidate_matched_queries": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "candidate_best_raw_score": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "candidate_final_score": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "candidate_order": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "best_score_dedupe_correct": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "best_score_dedupe_checks": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "retrieval_duration_ms": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "selected_context": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "context_plan": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "context_requirements": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "context_budget": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "selected_context_reasons": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "excluded_candidate_reasons": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "coverage_required": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "coverage_satisfied": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "context_size": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "evidence_plan": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "evidence_requirements": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "evidence_decision": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "answer_contract": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "supported_requirement_ids": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "unsupported_requirement_ids": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "allowed_chunk_ids": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "rendered_source_entries": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "contract_validation": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "validation_violations": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "fallback_applied": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "final_answer_sections": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "answer_mode": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "supporting_chunk_ids": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "non_supporting_chunk_ids": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "supported_requirements": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "unsupported_requirements": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "decision_reasons": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "answer": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "sources": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "unsupported_claims": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "duration_ms": 0,
+      "response_kind": {
+        "available": false,
+        "reason": "Ollama unavailable"
+      },
+      "status": "blocked",
+      "failure_reasons": [
+        "Ollama unavailable"
+      ],
+      "evaluation": {
+        "checks": []
+      }
+    }
+  ]
+}
